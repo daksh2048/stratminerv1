@@ -1,4 +1,4 @@
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
 *.pyo
@@ -7,19 +7,20 @@ __pycache__/
 dist/
 build/
 
-# venv
+# --- Virtual env ---
 .venv/
 venv/
 
-# OS / editor
+# --- OS / Editor ---
 .vscode/
 .DS_Store
 
-# logs / data outputs
-trades.csv
+# --- Logs / outputs ---
 *.log
+trades.csv
+trades*.csv
 
-# secrets
+# --- Secrets ---
 src/core/secrets.py
 *.env
 .env
