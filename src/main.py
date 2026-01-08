@@ -1,159 +1,212 @@
+import os
+import math
 import yaml
+import pandas as pd
 
 from src.core.data import CandleFeed
 from src.core.execution import PaperBroker
-from src.strategies.liquidity_sweep import LiquiditySweep
 from src.strategies.opening_range_breakout import OpeningRangeBreakout
-from src.strategies.ema_trend_pullback import EMATrendPullback
 
 
-def build_strategies(tf: str, symbol: str):
+# -----------------------------
+# CSV helpers
+# -----------------------------
+TRADES_HEADER = [
+    "symbol",
+    "side",
+    "size",
+    "entry",
+    "stop",
+    "take",
+    "open_time",
+    "close_time",
+    "exit_price",
+    "pnl",
+    "R",
+    "result",
+    "strategy",
+    "status",
+    "balance",
+]
+
+
+def ensure_csv_header(path: str) -> None:
     """
-    Build the list of strategies we want to run for a given symbol+timeframe.
-    All three strategies are active so we can collect data for Phase 1.
+    PaperBroker appends rows with no header. This makes analysis painful.
+    We write the header once if file is new/empty.
     """
-    strategies = []
-
-    # ---------- Liquidity Sweep ----------
-    strategies.append(
-        LiquiditySweep(
-            name=f"liq_sweep_{tf}",
-            lookback=10,
-            risk_reward=1.5,
-        )
-    )
-
-    # ---------- Opening Range Breakout ----------
-    # Map timeframe -> number of bars that form the opening range
-    if tf == "5m":
-        or_bars = 6   # first 30 minutes
-    elif tf == "15m":
-        or_bars = 4   # first hour
-    elif tf == "30m":
-        or_bars = 4   # first 2 hours
-    else:
-        or_bars = 4
-
-    strategies.append(
-        OpeningRangeBreakout(
-            name=f"orb_{tf}",
-            or_bars=or_bars,        # IMPORTANT: param name matches strategy code
-            risk_reward=2.0,
-            once_per_day=True,
-        )
-    )
-
-    # ---------- EMA Trend Pullback ----------
-    strategies.append(
-        EMATrendPullback(
-            name=f"ema_trend_{tf}",
-            fast_ema=9,
-            slow_ema=21,
-            swing_lookback=5,
-            max_distance_pct=0.0025,
-            risk_reward=2.0,
-        )
-    )
-
-    return strategies
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", newline="") as f:
+            f.write(",".join(TRADES_HEADER) + "\n")
 
 
-def run_backtest_for(sym: str, tf: str, cfg: dict, broker: PaperBroker) -> None:
+def to_float(x) -> float:
     """
-    Run all strategies for a single symbol+timeframe on ONE shared broker.
+    Avoid pandas FutureWarning where float() gets called on a 1-element Series.
     """
+    if isinstance(x, pd.Series):
+        return float(x.iloc[0])
+    return float(x)
+
+
+# -----------------------------
+# TF helpers
+# -----------------------------
+_TF_TO_MIN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}
+
+
+def tf_minutes(tf: str) -> int:
+    if tf not in _TF_TO_MIN:
+        raise ValueError(f"Unsupported timeframe: {tf}")
+    return _TF_TO_MIN[tf]
+
+
+def opening_minutes_to_or_bars(opening_range_minutes: int, ltf: str) -> int:
+    mins = tf_minutes(ltf)
+    return max(1, int(math.ceil(opening_range_minutes / mins)))
+
+
+# -----------------------------
+# One isolated backtest run
+# -----------------------------
+def backtest_orb_one(sym: str, tf: str, cfg: dict) -> dict:
     eng = cfg["engine"]
-    ex = eng["exchange"]
+    log_cfg = cfg.get("logging", {}) or {}
 
-    # ---- 1) fetch data for this symbol+TF ----
-    feed = CandleFeed(exchange=ex, symbol=sym, timeframe=tf)
-    df = feed.fetch_latest(limit=500)
-    print(f"\nFetched {len(df)} candles for {sym} at {tf}")
+    # ---- ORB params ----
+    strat_cfg = (cfg.get("strategies") or {}).get("orb", {}) or {}
 
-    if df.empty:
-        print("No data, skipping.")
-        return
+    opening_range_minutes = int(strat_cfg.get("opening_range_minutes", 30))
+    risk_reward = float(strat_cfg.get("risk_reward", 2.0))
+    once_per_day = bool(strat_cfg.get("once_per_day", True))
 
-    strategies = build_strategies(tf, sym)
+    # If user explicitly sets or_bars, it wins. Otherwise derive from opening_range_minutes + timeframe.
+    or_bars = int(strat_cfg.get("or_bars", opening_minutes_to_or_bars(opening_range_minutes, tf)))
 
-    # Generic warmup so indicators / OR have enough history
-    warmup = 50
+    orb = OpeningRangeBreakout(
+        name="orb",
+        or_bars=or_bars,
+        risk_reward=risk_reward,
+        once_per_day=once_per_day,
+    )
+
+    # ---- Data ----
+    limit = int(eng.get("limit", 2000))
+    feed = CandleFeed(exchange=eng.get("exchange", "yahoo"), symbol=sym, timeframe=tf)
+    df = feed.fetch_latest(limit=limit).sort_index()
+
+    # ---- Fresh broker per run (THIS is the fix) ----
+    out_dir = log_cfg.get("out_dir", "backtests")
+    trades_path = os.path.join(out_dir, f"trades_orb_{sym}_{tf}.csv")
+    ensure_csv_header(trades_path)
+
+    broker = PaperBroker(
+        starting_balance=float(eng.get("paper_balance", 10000.0)),
+        risk_per_trade=float(eng.get("risk_per_trade", 0.005)),
+        slippage_bps=float(eng.get("slippage_bps", 0.0)),
+        trades_csv=trades_path,
+        max_loss_pct=float(eng.get("max_loss_pct", 0.03)),
+    )
+
+    # ---- Warmup ----
+    warmup = max(or_bars + 5, 20)
     if len(df) <= warmup:
-        print("Not enough candles after warmup, skipping.")
-        return
+        return {
+            "symbol": sym,
+            "tf": tf,
+            "trades_csv": trades_path,
+            "final_balance": broker.balance,
+            "closed": 0,
+            "skipped": f"not enough candles (have={len(df)}, need>{warmup})",
+        }
 
-    for i in range(warmup, len(df)):
+    # ---- Event loop: candle-by-candle ----
+    for i in range(warmup, len(df) + 1):
         candle = df.iloc[i - 1]
         now = candle.name
 
-        # 1) Update all open positions on this candle
+        # 1) update/close positions on THIS candle
         broker.update_with_candle(candle, now, sym, tf)
 
-        # 2) Context = all candles up to this one (NO future data)
+        # 2) strategy sees candles up to now (no peeking)
         context = df.iloc[:i]
+        order = orb.on_candles(context, sym)
 
-        # 3) Let every strategy look at the same context and maybe fire
-        for strat in strategies:
-            signal = strat.on_candles(context, sym)
-            if signal is not None and signal.side in ("buy", "sell"):
-                # tag the order with timeframe so broker can filter positions correctly
-                signal.meta = signal.meta or {}
-                signal.meta["tf"] = tf
+        # no signal
+        if order is None or order.side not in ("buy", "sell"):
+            continue
 
-                broker.open_from_order(
-                    order=signal,
-                    strategy=strat.name,
-                    now=now,
-                    market_close_price=float(candle["close"]),
-                )
+        # tag tf so broker updates the right positions
+        order.meta = order.meta or {}
+        order.meta["tf"] = tf
 
-    # Final update on the last candle for this symbol+TF
-    last_candle = df.iloc[-1]
-    broker.update_with_candle(last_candle, last_candle.name, sym, tf)
+        # IMPORTANT: store strategy as orb_{tf} so analysis can group by tf
+        broker.open_from_order(
+            order=order,
+            strategy=f"orb_{tf}",
+            now=now,
+            market_close_price=to_float(candle["close"]),
+        )
 
-    # IMPORTANT for sequential backtests:
-    # close remaining positions for this dataset at the last close
+    # ---- Close any leftovers at data end (so no "open positions remaining") ----
+    last = df.iloc[-1]
     broker.force_close_all(
-        now=last_candle.name,
-        market_close_price=float(last_candle["close"]),
+        now=last.name,
+        market_close_price=to_float(last["close"]),
         symbol=sym,
         tf=tf,
         status="data_end",
     )
 
-    print(
-        f"Finished {sym} {tf}. "
-        f"Global balance: {broker.balance:.2f}, "
-        f"Open positions: {len(broker.open_positions)}"
-    )
+    return {
+        "symbol": sym,
+        "tf": tf,
+        "trades_csv": trades_path,
+        "final_balance": broker.balance,
+        "closed": len(broker.closed_positions),
+        "skipped": None,
+    }
 
 
+# -----------------------------
+# Main
+# -----------------------------
 if __name__ == "__main__":
-    # ---- Load config ----
     with open("config.yaml", "r") as f:
         cfg = yaml.safe_load(f)
 
     eng = cfg["engine"]
-    log_cfg = cfg.get("logging", {})
 
-    symbols = eng["symbols"]
-    timeframes = eng["timeframes"]
+    symbols = eng.get("symbols", ["SPY", "NVDA", "GLD"])
+    timeframes = eng.get("timeframes", ["5m"])
 
-    # ---- Create ONE shared broker for all strategies/symbols/TFs ----
-    broker = PaperBroker(
-        starting_balance=float(eng.get("paper_balance", 10000.0)),
-        risk_per_trade=float(eng.get("risk_per_trade", 0.005)),
-        slippage_bps=float(eng.get("slippage_bps", 0.0)),
-        trades_csv=log_cfg.get("trades_csv", "trades.csv"),
-        max_loss_pct=float(eng.get("max_loss_pct", 0.03)),
-    )
+    # Guardrail: ORB is an intraday opening session concept.
+    # Running it on 1h/1d turns it into a different strategy.
+    allowed = {"1m", "5m", "15m", "30m"}
+    timeframes = [tf for tf in timeframes if tf in allowed]
+    if not timeframes:
+        # default fallback
+        timeframes = ["5m"]
 
-    # ---- Run backtests for each symbol+TF on the same broker ----
+    results = []
+    print("\n=== ORB isolated backtests (fresh broker per run) ===")
     for tf in timeframes:
         for sym in symbols:
-            run_backtest_for(sym, tf, cfg, broker)
+            r = backtest_orb_one(sym, tf, cfg)
+            results.append(r)
 
-    print("\n=== Global account summary ===")
-    print(f"Final balance: {broker.balance:.2f}")
-    print(f"Total closed positions: {len(broker.closed_positions)}")
-    print(f"Open positions remaining: {len(broker.open_positions)}")
+            if r["skipped"]:
+                print(f"[SKIP] {sym} {tf} -> {r['skipped']}")
+            else:
+                print(
+                    f"[DONE] {sym} {tf} | closed={r['closed']} | final_balance={r['final_balance']:.2f} | csv={r['trades_csv']}"
+                )
+
+    print("\n=== Summary ===")
+    # quick summary table in stdout
+    for r in results:
+        status = "SKIP" if r["skipped"] else "OK"
+        print(
+            f"{status:4} | {r['symbol']:4} {r['tf']:3} | closed={r['closed']:3} | final={r['final_balance']:.2f} | {r['trades_csv']}"
+        )

@@ -1,11 +1,23 @@
 engine:
-  timeframes: ["1m", "5m", "15m", "30m", "1h"]
-  symbols: ["SPY", "NVDA", "GLD"]
+  timeframes: ["5m"]
+  symbols: ["SPY", "NVDA", "GLD","QQQ"]
   exchange: "yahoo"
   paper_balance: 10000.0
   risk_per_trade: 0.005
   slippage_bps: 1.5
   max_loss_pct: 0.03
+  limit: 2000
 
 logging:
-  trades_csv: "trades.csv"
+  out_dir: "backtests"
+
+strategies:
+  orb:
+    opening_range_minutes: 30
+    risk_reward: 2.0
+    once_per_day: true
+
+    # Phase 1 sanity gates
+    rth_only: true
+    entry_cutoff_minutes: 60     # 09:30 -> 10:30 ET
+    market_tz: "America/New_York"

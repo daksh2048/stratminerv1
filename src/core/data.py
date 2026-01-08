@@ -72,6 +72,7 @@ class CandleFeed:
             period=period,
             interval=interval,
             progress=False,
+            auto_adjust=False
         )
 
         if data.empty:
