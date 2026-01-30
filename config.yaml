@@ -7,11 +7,17 @@ engine:
   slippage_bps: 1.5
   max_loss_pct: 0.03
   limit: 2000
+<<<<<<< HEAD
+=======
+
+
+>>>>>>> 8865de7 (Made multiple changes, modified vwap_mean_reversion with a better/more)
 
 logging:
   out_dir: "backtests"
 
 strategies:
+<<<<<<< HEAD
   orb:
     opening_range_minutes: 30
     risk_reward: 2.0
@@ -21,3 +27,54 @@ strategies:
     rth_only: true
     entry_cutoff_minutes: 60     # 09:30 -> 10:30 ET
     market_tz: "America/New_York"
+=======
+  vwap_mr:
+    atr_period: 14
+    dev_atr_mult: 1.2
+    stop_atr_mult: 1.0
+
+    use_regime_filter: true
+    ema_period: 50
+    ema_slope_max_atr: 0.25
+
+    partial_take_pct: 0.5
+    runner_take_mode: "rr"
+    runner_rr: 3.0
+    trail_pct: 0.003
+    move_stop_to_be: true
+  
+    reentry_atr_mult: 0.6
+    cooldown_bars: 6
+    min_minutes_after_open: 10
+    require_momentum_confirm: true
+
+  rsi_rev:
+    rsi_period: 14
+    oversold: 30
+    overbought: 70
+    use_extreme_filter: true
+    extreme_buffer: 3.0
+
+    atr_period: 14
+    atr_mult: 1.0
+    risk_reward: 1.5
+
+    rth_only: true
+    market_tz: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
+    min_minutes_after_open: 10
+    entry_cutoff_minutes: 300
+    max_trades_per_day: 2
+    cooldown_bars: 6
+
+    use_regime_filter: true
+    ema_period: 50
+    ema_slope_max_atr: 0.25
+
+    partial_take_pct: 0.5
+    runner_take_mode: rr
+    runner_rr: 3.0
+    trail_pct: 0.003
+    move_stop_to_be: true
+>>>>>>> 8865de7 (Made multiple changes, modified vwap_mean_reversion with a better/more)

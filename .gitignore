@@ -17,8 +17,9 @@ venv/
 
 # --- Logs / outputs ---
 *.log
-trades.csv
-trades*.csv
+
+# ignore ALL csv outputs anywhere
+*.csv
 
 # --- Secrets ---
 src/core/secrets.py
