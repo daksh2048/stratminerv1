@@ -10,20 +10,27 @@ from .base import Strategy
 
 
 def _as_float(x) -> float:
+    """Convert scalar / 1-elem Series / numpy scalar to float safely."""
     if isinstance(x, pd.Series):
         return float(x.iloc[0])
     return float(x)
 
 
+def _col_as_series(df: pd.DataFrame, name: str) -> pd.Series:
+    """
+    Robustly fetch a column as a Series even if pandas returns a DataFrame
+    (e.g., duplicate column names).
+    """
+    x = df[name]
+    if isinstance(x, pd.DataFrame):
+        # take first matching column
+        x = x.iloc[:, 0]
+    return x.astype(float)
+
+
 def _to_market_tz(ts: pd.Timestamp, market_tz: str) -> pd.Timestamp:
     """
-    CRITICAL:
-    yfinance intraday often returns tz-naive timestamps that already represent US/Eastern market time.
-    If we localize naive -> UTC, we shift the session and kill signals.
-
-    Rule:
-      - naive -> localize to market_tz
-      - aware -> convert to market_tz
+    Treat tz-naive timestamps as already in market time (NOT UTC) to avoid shifting RTH.
     """
     ts = pd.Timestamp(ts)
     if ts.tzinfo is None:
@@ -64,6 +71,31 @@ def _ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
+def _compute_vwap(day_df: pd.DataFrame) -> pd.Series:
+    """
+    VWAP over the provided slice (expected to be 'today RTH').
+    vwap = cum(tp*vol)/cum(vol), tp=(h+l+c)/3
+    """
+    high = _col_as_series(day_df, "high")
+    low = _col_as_series(day_df, "low")
+    close = _col_as_series(day_df, "close")
+
+    # volume can be missing or non-numeric in some feeds; handle safely
+    vol = day_df["volume"]
+    if isinstance(vol, pd.DataFrame):
+        vol = vol.iloc[:, 0]
+    vol = pd.to_numeric(vol, errors="coerce").fillna(0.0)
+
+    tp = (high + low + close) / 3.0
+
+    # avoid division by zero: treat 0 vol as NA so cum vol doesn't stall incorrectly
+    vol = vol.replace(0.0, pd.NA)
+    cum_pv = (tp * vol).cumsum()
+    cum_v = vol.cumsum()
+    vwap = cum_pv / cum_v
+    return vwap
+
+
 @dataclass
 class RSIState:
     day: Optional[pd.Timestamp] = None
@@ -73,18 +105,14 @@ class RSIState:
 
 class RSIExtremesReversal(Strategy):
     """
-    RSI Extremes Reversal (intraday mean reversion)
+    RSI + VWAP deviation mean reversion (intraday)
 
-    Base entry:
-      Long:  prev_rsi < oversold and rsi_now >= oversold and last_close > prev_close
-      Short: prev_rsi > overbought and rsi_now <= overbought and last_close < prev_close
-
-    Hardening:
-      - correct timezone/session slicing
-      - min minutes after open
-      - cooldown bars
-      - optional "extreme" requirement (RSI must pierce deeper than threshold)
-      - optional regime filter using EMA slope in ATR units
+    Long:
+      - RSI <= oversold
+      - price <= VWAP - dev_atr_mult*ATR
+      - bullish confirmation candle
+      - target = VWAP (capped by rr_cap)
+    Short: symmetric.
     """
 
     def __init__(self, name: str = "rsi_rev", **params) -> None:
@@ -99,21 +127,19 @@ class RSIExtremesReversal(Strategy):
     def on_candles(self, df: pd.DataFrame, symbol: str) -> Order:
         # ---- params ----
         rsi_period = int(self.params.get("rsi_period", 14))
-        oversold = float(self.params.get("oversold", 30.0))
-        overbought = float(self.params.get("overbought", 70.0))
-
-        use_extreme_filter = bool(self.params.get("use_extreme_filter", True))
-        extreme_buffer = float(self.params.get("extreme_buffer", 3.0))  # need <= (oversold-buffer) or >= (overbought+buffer)
+        oversold = float(self.params.get("oversold", 35.0))
+        overbought = float(self.params.get("overbought", 65.0))
 
         atr_period = int(self.params.get("atr_period", 14))
         atr_mult = float(self.params.get("atr_mult", 1.0))
-        rr = float(self.params.get("risk_reward", 1.5))
+
+        dev_atr_mult = float(self.params.get("dev_atr_mult", 0.8))
+        rr_cap = float(self.params.get("rr_cap", 2.0))
 
         market_tz = str(self.params.get("market_tz", "America/New_York"))
         rth_only = bool(self.params.get("rth_only", True))
         rth_open = str(self.params.get("rth_open", "09:30"))
         rth_close = str(self.params.get("rth_close", "16:00"))
-
         min_minutes_after_open = int(self.params.get("min_minutes_after_open", 10))
         entry_cutoff_minutes = self.params.get("entry_cutoff_minutes", 300)
         entry_cutoff_minutes = None if entry_cutoff_minutes is None else int(entry_cutoff_minutes)
@@ -121,22 +147,23 @@ class RSIExtremesReversal(Strategy):
         max_trades_per_day = int(self.params.get("max_trades_per_day", 2))
         cooldown_bars = int(self.params.get("cooldown_bars", 6))
 
-        use_regime_filter = bool(self.params.get("use_regime_filter", True))
+        use_regime_filter = bool(self.params.get("use_regime_filter", False))
         ema_period = int(self.params.get("ema_period", 50))
-        ema_slope_max_atr = float(self.params.get("ema_slope_max_atr", 0.25))
+        ema_slope_max_atr = float(self.params.get("ema_slope_max_atr", 0.6))
+        ema_slope_lookback = int(self.params.get("ema_slope_lookback", 5))
 
-        # broker meta knobs (safe to include; broker ignores if unsupported)
+        # broker meta (optional)
         partial_take_pct = float(self.params.get("partial_take_pct", 0.5))
         runner_take_mode = str(self.params.get("runner_take_mode", "rr")).lower()
         runner_rr = float(self.params.get("runner_rr", 3.0))
         trail_pct = float(self.params.get("trail_pct", 0.003))
         move_stop_to_be = bool(self.params.get("move_stop_to_be", True))
 
-        warmup = max(rsi_period + 5, atr_period + 5, ema_period + 5)
+        warmup = max(rsi_period, atr_period, ema_period) + 10
         if df is None or len(df) < warmup:
             return Order(symbol, None, None, None, None, "not enough candles", {})
 
-        # ---- timestamp / day ----
+        # ---- last ts in market tz ----
         last_ts = pd.Timestamp(df.index[-1])
         last_ts_m = _to_market_tz(last_ts, market_tz)
         day_m = last_ts_m.normalize()
@@ -150,15 +177,15 @@ class RSIExtremesReversal(Strategy):
         if rth_only and not (session_open <= last_ts_m <= session_close):
             return Order(symbol, None, None, None, None, "outside RTH", {"ts": str(last_ts_m)})
 
-        if min_minutes_after_open > 0 and last_ts_m < (session_open + pd.Timedelta(minutes=min_minutes_after_open)):
-            return Order(symbol, None, None, None, None, "skip: too early after open", {"ts": str(last_ts_m)})
+        if last_ts_m < session_open + pd.Timedelta(minutes=min_minutes_after_open):
+            return Order(symbol, None, None, None, None, "too early after open", {"ts": str(last_ts_m)})
 
         if entry_cutoff_minutes is not None:
             cutoff_ts = session_open + pd.Timedelta(minutes=entry_cutoff_minutes)
             if last_ts_m > cutoff_ts:
                 return Order(symbol, None, None, None, None, "past entry cutoff", {"ts": str(last_ts_m), "cutoff": str(cutoff_ts)})
 
-        # ---- today's RTH slice ----
+        # ---- slice today's RTH in market tz ----
         idx_m = _index_to_market_tz(pd.DatetimeIndex(df.index), market_tz)
         in_today = (idx_m.normalize() == day_m)
         in_session = (idx_m >= session_open) & (idx_m <= session_close)
@@ -178,59 +205,59 @@ class RSIExtremesReversal(Strategy):
             return Order(symbol, None, None, None, None, "max trades/day reached", {"day": str(day_m)})
 
         current_bar_index = len(day_rth) - 1
-        if st.last_trade_bar_index is not None:
-            if (current_bar_index - st.last_trade_bar_index) < cooldown_bars:
-                return Order(symbol, None, None, None, None, "cooldown", {"bars_since_trade": current_bar_index - st.last_trade_bar_index})
+        if st.last_trade_bar_index is not None and (current_bar_index - st.last_trade_bar_index) < cooldown_bars:
+            return Order(symbol, None, None, None, None, "cooldown", {"bars_since_trade": current_bar_index - st.last_trade_bar_index})
 
-        close = day_rth["close"].astype(float)
-        high = day_rth["high"].astype(float)
-        low = day_rth["low"].astype(float)
+        # ---- indicators ----
+        close = _col_as_series(day_rth, "close")
+        high = _col_as_series(day_rth, "high")
+        low = _col_as_series(day_rth, "low")
 
         rsi = _compute_rsi(close, rsi_period)
         atr = _compute_atr(high, low, close, atr_period)
         ema = _ema(close, ema_period)
+        vwap = _compute_vwap(day_rth)
 
         last = day_rth.iloc[-1]
         prev = day_rth.iloc[-2]
 
         rsi_now = _as_float(rsi.iloc[-1])
-        rsi_prev = _as_float(rsi.iloc[-2])
+        atr_now = _as_float(atr.iloc[-1])
+        vwap_now = _as_float(vwap.iloc[-1])
 
-        atr_now = atr.iloc[-1]
-        if pd.isna(atr_now) or float(atr_now) <= 0:
-            return Order(symbol, None, None, None, None, "ATR not ready", {})
-        atr_now = float(atr_now)
-
-        ema_now = float(ema.iloc[-1])
-        ema_prev = float(ema.iloc[-2])
-        ema_slope_atr = (ema_now - ema_prev) / atr_now
-
-        if use_regime_filter and abs(ema_slope_atr) > ema_slope_max_atr:
-            return Order(symbol, None, None, None, None, "regime filter: strong trend", {"ema_slope_atr": ema_slope_atr})
+        if pd.isna(atr_now) or atr_now <= 0 or pd.isna(vwap_now):
+            return Order(symbol, None, None, None, None, "indicators not ready", {})
 
         last_close = _as_float(last["close"])
-        prev_close = _as_float(prev["close"])
+        last_open = _as_float(last["open"])
         last_high = _as_float(last["high"])
         last_low = _as_float(last["low"])
+        prev_close = _as_float(prev["close"])
 
-        # Extreme requirement
-        oversold_extreme = oversold - extreme_buffer
-        overbought_extreme = overbought + extreme_buffer
+        bullish_confirm = (last_close > last_open) and (last_close > prev_close)
+        bearish_confirm = (last_close < last_open) and (last_close < prev_close)
 
-        # ---- LONG ----
-        long_reentry = (rsi_prev < oversold) and (rsi_now >= oversold)
-        long_confirm = (last_close > prev_close)
-        long_extreme_ok = True
-        if use_extreme_filter:
-            recent_min = float(rsi.iloc[-6:].min())  # ~last 30 mins on 5m
-            long_extreme_ok = recent_min <= oversold_extreme
+        # optional regime filter
+        ema_slope_atr = 0.0
+        if use_regime_filter:
+            lb = min(ema_slope_lookback, len(ema) - 1)
+            ema_slope_atr = (_as_float(ema.iloc[-1]) - _as_float(ema.iloc[-1 - lb])) / atr_now
+            if abs(ema_slope_atr) > ema_slope_max_atr:
+                return Order(symbol, None, None, None, None, "regime filter: strong trend", {"ema_slope_atr": ema_slope_atr})
 
-        if long_reentry and long_confirm and long_extreme_ok:
+        dev = dev_atr_mult * atr_now
+
+        # LONG
+        if (rsi_now <= oversold) and (last_close <= vwap_now - dev) and bullish_confirm:
             entry = last_close
             stop = last_low - atr_mult * atr_now
             if stop >= entry:
-                return Order(symbol, None, None, None, None, "invalid long stop", {"rsi": rsi_now, "atr": atr_now})
-            take = entry + rr * (entry - stop)
+                return Order(symbol, None, None, None, None, "invalid long stop", {})
+
+            rr_take = entry + rr_cap * (entry - stop)
+            take = min(vwap_now, rr_take)
+            if take <= entry:
+                return Order(symbol, None, None, None, None, "bad long take", {"vwap": vwap_now})
 
             st.trades_today += 1
             st.last_trade_bar_index = current_bar_index
@@ -241,15 +268,13 @@ class RSIExtremesReversal(Strategy):
                 entry=entry,
                 stop=stop,
                 take=take,
-                reason="RSI oversold reversal (re-entry + confirm)",
+                reason="RSI+VWAP MR long",
                 meta={
-                    "rsi_prev": rsi_prev,
                     "rsi": rsi_now,
-                    "oversold": oversold,
+                    "vwap": vwap_now,
                     "atr": atr_now,
+                    "dev_atr_mult": dev_atr_mult,
                     "ema_slope_atr": ema_slope_atr,
-                    "use_extreme_filter": use_extreme_filter,
-                    "extreme_buffer": extreme_buffer,
                     "partial_take_pct": partial_take_pct,
                     "runner_take_mode": runner_take_mode,
                     "runner_rr": runner_rr,
@@ -260,20 +285,17 @@ class RSIExtremesReversal(Strategy):
                 },
             )
 
-        # ---- SHORT ----
-        short_reentry = (rsi_prev > overbought) and (rsi_now <= overbought)
-        short_confirm = (last_close < prev_close)
-        short_extreme_ok = True
-        if use_extreme_filter:
-            recent_max = float(rsi.iloc[-6:].max())
-            short_extreme_ok = recent_max >= overbought_extreme
-
-        if short_reentry and short_confirm and short_extreme_ok:
+        # SHORT
+        if (rsi_now >= overbought) and (last_close >= vwap_now + dev) and bearish_confirm:
             entry = last_close
             stop = last_high + atr_mult * atr_now
             if stop <= entry:
-                return Order(symbol, None, None, None, None, "invalid short stop", {"rsi": rsi_now, "atr": atr_now})
-            take = entry - rr * (stop - entry)
+                return Order(symbol, None, None, None, None, "invalid short stop", {})
+
+            rr_take = entry - rr_cap * (stop - entry)
+            take = max(vwap_now, rr_take)
+            if take >= entry:
+                return Order(symbol, None, None, None, None, "bad short take", {"vwap": vwap_now})
 
             st.trades_today += 1
             st.last_trade_bar_index = current_bar_index
@@ -284,15 +306,13 @@ class RSIExtremesReversal(Strategy):
                 entry=entry,
                 stop=stop,
                 take=take,
-                reason="RSI overbought reversal (re-entry + confirm)",
+                reason="RSI+VWAP MR short",
                 meta={
-                    "rsi_prev": rsi_prev,
                     "rsi": rsi_now,
-                    "overbought": overbought,
+                    "vwap": vwap_now,
                     "atr": atr_now,
+                    "dev_atr_mult": dev_atr_mult,
                     "ema_slope_atr": ema_slope_atr,
-                    "use_extreme_filter": use_extreme_filter,
-                    "extreme_buffer": extreme_buffer,
                     "partial_take_pct": partial_take_pct,
                     "runner_take_mode": runner_take_mode,
                     "runner_rr": runner_rr,
@@ -303,4 +323,4 @@ class RSIExtremesReversal(Strategy):
                 },
             )
 
-        return Order(symbol, None, None, None, None, "no RSI setup", {"rsi": rsi_now})
+        return Order(symbol, None, None, None, None, "no setup", {"rsi": rsi_now, "vwap": vwap_now})

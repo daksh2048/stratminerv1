@@ -7,27 +7,13 @@ engine:
   slippage_bps: 1.5
   max_loss_pct: 0.03
   limit: 2000
-<<<<<<< HEAD
-=======
 
 
->>>>>>> 8865de7 (Made multiple changes, modified vwap_mean_reversion with a better/more)
 
 logging:
   out_dir: "backtests"
 
 strategies:
-<<<<<<< HEAD
-  orb:
-    opening_range_minutes: 30
-    risk_reward: 2.0
-    once_per_day: true
-
-    # Phase 1 sanity gates
-    rth_only: true
-    entry_cutoff_minutes: 60     # 09:30 -> 10:30 ET
-    market_tz: "America/New_York"
-=======
   vwap_mr:
     atr_period: 14
     dev_atr_mult: 1.2
@@ -52,12 +38,11 @@ strategies:
     rsi_period: 14
     oversold: 30
     overbought: 70
-    use_extreme_filter: true
-    extreme_buffer: 3.0
 
     atr_period: 14
     atr_mult: 1.0
-    risk_reward: 1.5
+    dev_atr_mult: 0.8
+    rr_cap: 2.0
 
     rth_only: true
     market_tz: America/New_York
@@ -68,13 +53,12 @@ strategies:
     max_trades_per_day: 2
     cooldown_bars: 6
 
-    use_regime_filter: true
-    ema_period: 50
-    ema_slope_max_atr: 0.25
+    use_regime_filter: false   # leave off for first run; turn on later
 
     partial_take_pct: 0.5
     runner_take_mode: rr
     runner_rr: 3.0
     trail_pct: 0.003
     move_stop_to_be: true
->>>>>>> 8865de7 (Made multiple changes, modified vwap_mean_reversion with a better/more)
+    dev_atr_mult: 0.8
+    rr_cap: 2.0
