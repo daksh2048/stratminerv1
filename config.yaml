@@ -1,7 +1,7 @@
 engine:
   timeframes: ["5m"]
   period: "60d"
-  symbols: ["SPY","QQQ","GLD","SLV","AMZN","TSLA","GOOGL"]
+  symbols: ["SPY","QQQ","GLD","SLV","AMZN","TSLA","GOOGL","AAPL"]
   exchange: "yahoo"
 
   paper_balance: 10000.0

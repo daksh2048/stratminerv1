@@ -80,7 +80,7 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
     eng = cfg["engine"]
     log_cfg = cfg.get("logging", {}) or {}
 
-    period = str(eng.get("period", "1mo"))
+    period = str(eng.get("period", "60d"))
     limit = eng.get("limit", None)  # optional tail, usually None for full period
 
     strat = make_strategy(strategy_name, cfg, tf)
