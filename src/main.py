@@ -1,15 +1,16 @@
 import os
+import math
 import yaml
 import pandas as pd
 
 from src.core.data import CandleFeed
 from src.core.execution import PaperBroker
-from src.strategies.rsi_extremes_reversal import RSIExtremesReversal
+
+from src.strategies.opening_range_breakout import OpeningRangeBreakout
+from src.strategies.vwap_mean_reversion import VWAPMeanReversion
+from src.strategies.vwap_trend_pullback import VWAPTrendPullback
 
 
-# -----------------------------
-# CSV helpers
-# -----------------------------
 TRADES_HEADER = [
     "symbol",
     "side",
@@ -42,59 +43,75 @@ def to_float(x) -> float:
     return float(x)
 
 
-def to_market_tz(ts: pd.Timestamp, market_tz: str) -> pd.Timestamp:
-    """
-    Keep consistent with the rest of your project:
-    - If df index is tz-naive, your CandleFeed often represents UTC -> localize to UTC then convert.
-    """
-    ts = pd.Timestamp(ts)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    return ts.tz_convert(market_tz)
+_TF_TO_MIN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}
 
 
-# -----------------------------
-# One isolated backtest run
-# -----------------------------
-def backtest_rsi_one(sym: str, tf: str, cfg: dict) -> dict:
+def tf_minutes(tf: str) -> int:
+    if tf not in _TF_TO_MIN:
+        raise ValueError(f"Unsupported timeframe: {tf}")
+    return _TF_TO_MIN[tf]
+
+
+def opening_minutes_to_or_bars(opening_range_minutes: int, ltf: str) -> int:
+    mins = tf_minutes(ltf)
+    return max(1, int(math.ceil(opening_range_minutes / mins)))
+
+
+def make_strategy(name: str, cfg: dict, tf: str):
+    strat_cfg = (cfg.get("strategies") or {}).get(name, {}) or {}
+
+    if name == "orb":
+        opening_range_minutes = int(strat_cfg.get("opening_range_minutes", 30))
+        or_bars = int(strat_cfg.get("or_bars", opening_minutes_to_or_bars(opening_range_minutes, tf)))
+        strat_cfg = dict(strat_cfg)
+        strat_cfg["or_bars"] = or_bars
+        return OpeningRangeBreakout(name="orb", **strat_cfg)
+
+    if name == "vwap_mr":
+        return VWAPMeanReversion(name="vwap_mr", **strat_cfg)
+
+    if name == "vwap_tp":
+        return VWAPTrendPullback(name="vwap_tp", **strat_cfg)
+
+    raise ValueError(f"Unknown strategy: {name}")
+
+
+def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
     eng = cfg["engine"]
     log_cfg = cfg.get("logging", {}) or {}
 
-    strat_cfg = (cfg.get("strategies") or {}).get("rsi_rev", {}) or {}
+    period = str(eng.get("period", "1mo"))
+    limit = eng.get("limit", None)  # optional tail, usually None for full period
 
-    rsi = RSIExtremesReversal(name="rsi_rev", **strat_cfg)
+    strat = make_strategy(strategy_name, cfg, tf)
 
     # ---- Data ----
-    limit = int(eng.get("limit", 2000))
     feed = CandleFeed(exchange=eng.get("exchange", "yahoo"), symbol=sym, timeframe=tf)
-    df = feed.fetch_latest(limit=limit).sort_index()
+    df = feed.fetch(period=period, limit=limit).sort_index()
 
     # ---- Fresh broker per run ----
     out_dir = log_cfg.get("out_dir", "backtests")
-    trades_path = os.path.join(out_dir, f"trades_rsiRev_{sym}_{tf}.csv")
+    trades_path = os.path.join(out_dir, f"trades_{strategy_name}_{sym}_{tf}.csv")
 
-    # start clean each run (prevents appending onto old output)
+    # overwrite output each run
     if os.path.exists(trades_path):
         os.remove(trades_path)
     ensure_csv_header(trades_path)
 
+    starting_balance = float(eng.get("paper_balance", 10000.0))
+
     broker = PaperBroker(
-        starting_balance=float(eng.get("paper_balance", 10000.0)),
+        starting_balance=starting_balance,
         risk_per_trade=float(eng.get("risk_per_trade", 0.005)),
         slippage_bps=float(eng.get("slippage_bps", 0.0)),
         trades_csv=trades_path,
         max_loss_pct=float(eng.get("max_loss_pct", 0.03)),
     )
 
-    # ---- Warmup ----
-    # RSI needs enough bars for RSI/ATR/EMA if used
-    rsi_period = int(strat_cfg.get("rsi_period", 14))
-    atr_period = int(strat_cfg.get("atr_period", 14))
-    ema_period = int(strat_cfg.get("ema_period", 50))
-    warmup = max(rsi_period, atr_period, ema_period) + 30
-
+    warmup = int(eng.get("warmup_bars", 80))
     if len(df) <= warmup:
         return {
+            "strategy": strategy_name,
             "symbol": sym,
             "tf": tf,
             "trades_csv": trades_path,
@@ -103,48 +120,17 @@ def backtest_rsi_one(sym: str, tf: str, cfg: dict) -> dict:
             "skipped": f"not enough candles (have={len(df)}, need>{warmup})",
         }
 
-    # ---- EOD flatten settings ----
-    market_tz = str(strat_cfg.get("market_tz", "America/New_York"))
-    rth_close = str(strat_cfg.get("rth_close", "16:00"))
-    close_h, close_m = map(int, rth_close.split(":"))
-
-    current_day = None
-    session_close = None
-    prev_now = None
-    prev_candle = None
-
-    # ---- Event loop: candle-by-candle ----
+    # ---- Event loop ----
     for i in range(warmup, len(df) + 1):
         candle = df.iloc[i - 1]
         now = candle.name
 
-        now_m = to_market_tz(now, market_tz)
-        day_m = now_m.normalize()
-
-        # BULLETPROOF: flatten on day rollover using last candle of previous day we actually have
-        if current_day is not None and day_m != current_day and prev_now is not None and prev_candle is not None:
-            broker.force_close_all(
-                now=prev_now,
-                market_close_price=to_float(prev_candle["close"]),
-                symbol=sym,
-                tf=tf,
-                status="eod_flat",
-            )
-
-        if current_day is None or day_m != current_day:
-            current_day = day_m
-            session_close = current_day + pd.Timedelta(hours=close_h, minutes=close_m)
-
-        # 1) update/close positions on THIS candle
         broker.update_with_candle(candle, now, sym, tf)
 
-        # 2) strategy sees candles up to now (no peeking)
         context = df.iloc[:i]
-        order = rsi.on_candles(context, sym)
+        order = strat.on_candles(context, sym)
 
         if order is None or order.side not in ("buy", "sell"):
-            prev_now = now
-            prev_candle = candle
             continue
 
         order.meta = order.meta or {}
@@ -152,25 +138,12 @@ def backtest_rsi_one(sym: str, tf: str, cfg: dict) -> dict:
 
         broker.open_from_order(
             order=order,
-            strategy=f"rsi_rev_{tf}",
+            strategy=f"{strategy_name}_{tf}",
             now=now,
             market_close_price=to_float(candle["close"]),
         )
 
-        # optional: flatten if a >=16:00 bar exists
-        if session_close is not None and now_m >= session_close:
-            broker.force_close_all(
-                now=now,
-                market_close_price=to_float(candle["close"]),
-                symbol=sym,
-                tf=tf,
-                status="eod_flat",
-            )
-
-        prev_now = now
-        prev_candle = candle
-
-    # ---- Close any leftovers at data end ----
+    # close leftovers at end
     last = df.iloc[-1]
     broker.force_close_all(
         now=last.name,
@@ -181,6 +154,7 @@ def backtest_rsi_one(sym: str, tf: str, cfg: dict) -> dict:
     )
 
     return {
+        "strategy": strategy_name,
         "symbol": sym,
         "tf": tf,
         "trades_csv": trades_path,
@@ -191,6 +165,102 @@ def backtest_rsi_one(sym: str, tf: str, cfg: dict) -> dict:
 
 
 # -----------------------------
+# Performance aggregation
+# -----------------------------
+def _read_trades_csv(path: str) -> pd.DataFrame:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame(columns=TRADES_HEADER)
+
+    df = pd.read_csv(path)
+
+    # Guard: empty file with just header
+    if df.empty:
+        return df
+
+    # normalize
+    if "close_time" in df.columns:
+        df["close_time"] = pd.to_datetime(df["close_time"], errors="coerce")
+    if "pnl" in df.columns:
+        df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
+
+    # only closed trades with a timestamp
+    df = df.dropna(subset=["close_time"])
+    return df
+
+
+def compute_returns(results: list[dict], starting_balance: float, strategies: list[str], symbols: list[str]) -> None:
+    """
+    Prints:
+      - Monthly return % per strategy across all symbols
+      - Weekly return % per strategy across all symbols
+      - Monthly/Weekly return % combined across all strategies+symbols
+    """
+    n_syms = max(1, len(symbols))
+    n_strats = max(1, len(strategies))
+
+    # collect pnl rows with strategy label
+    rows = []
+    for r in results:
+        if r.get("skipped"):
+            continue
+        path = r["trades_csv"]
+        tdf = _read_trades_csv(path)
+        if tdf.empty:
+            continue
+        tdf = tdf.copy()
+        tdf["strategy_key"] = r["strategy"]
+        rows.append(tdf[["close_time", "pnl", "strategy_key"]])
+
+    if not rows:
+        print("\n=== Returns (no closed trades found) ===")
+        return
+
+    trades = pd.concat(rows, ignore_index=True)
+
+    # Weekly bucket (Mon-Sun). You can change to "W-FRI" if you want “trading week”.
+    trades["week"] = trades["close_time"].dt.to_period("W").astype(str)
+
+    # Monthly totals per strategy
+    pnl_by_strat = trades.groupby("strategy_key")["pnl"].sum().sort_index()
+
+    # Weekly totals per strategy
+    pnl_week_strat = trades.groupby(["strategy_key", "week"])["pnl"].sum().reset_index()
+
+    # denominators
+    denom_per_strat = starting_balance * n_syms
+    denom_all = starting_balance * n_syms * n_strats
+
+    print("\n=== Monthly Return % (per strategy across ALL symbols) ===")
+    for s in strategies:
+        pnl = float(pnl_by_strat.get(s, 0.0))
+        ret_pct = (pnl / denom_per_strat) * 100.0
+        print(f"{s:8} | pnl={pnl:10.2f} | denom={denom_per_strat:10.2f} | return={ret_pct:7.3f}%")
+
+    total_pnl_all = float(trades["pnl"].sum())
+    total_ret_all = (total_pnl_all / denom_all) * 100.0
+    print(f"\nALL     | pnl={total_pnl_all:10.2f} | denom={denom_all:10.2f} | return={total_ret_all:7.3f}%")
+
+    print("\n=== Weekly Return % (per strategy across ALL symbols) ===")
+    # print in week order
+    weeks = sorted(trades["week"].unique())
+
+    for s in strategies:
+        print(f"\n-- {s} --")
+        sub = pnl_week_strat[pnl_week_strat["strategy_key"] == s].set_index("week")["pnl"]
+        for w in weeks:
+            pnl = float(sub.get(w, 0.0))
+            ret_pct = (pnl / denom_per_strat) * 100.0
+            print(f"{w} | pnl={pnl:10.2f} | return={ret_pct:7.3f}%")
+
+    print("\n=== Weekly Return % (ALL strategies combined) ===")
+    pnl_week_all = trades.groupby("week")["pnl"].sum()
+    for w in weeks:
+        pnl = float(pnl_week_all.get(w, 0.0))
+        ret_pct = (pnl / denom_all) * 100.0
+        print(f"{w} | pnl={pnl:10.2f} | return={ret_pct:7.3f}%")
+
+
+# -----------------------------
 # Main
 # -----------------------------
 if __name__ == "__main__":
@@ -198,33 +268,33 @@ if __name__ == "__main__":
         cfg = yaml.safe_load(f)
 
     eng = cfg["engine"]
-
-    symbols = eng.get("symbols", ["SPY", "NVDA", "GLD", "QQQ"])
+    symbols = eng.get("symbols", ["SPY", "QQQ", "GLD"])
     timeframes = eng.get("timeframes", ["5m"])
-
-    # RSI reversal is an intraday setup; keep it on intraday TFs
-    allowed = {"1m", "5m", "15m", "30m"}
-    timeframes = [tf for tf in timeframes if tf in allowed]
-    if not timeframes:
-        timeframes = ["5m"]
+    strategies_to_run = eng.get("strategies_to_run", ["orb", "vwap_mr", "vwap_tp"])
 
     results = []
-    print("\n=== RSI isolated backtests (fresh broker per run) ===")
-    for tf in timeframes:
-        for sym in symbols:
-            r = backtest_rsi_one(sym, tf, cfg)
-            results.append(r)
+    print("\n=== Phase-1 batch backtests (period-based) ===")
+    for strat_name in strategies_to_run:
+        print(f"\n--- Strategy: {strat_name} ---")
+        for tf in timeframes:
+            for sym in symbols:
+                r = backtest_one(strat_name, sym, tf, cfg)
+                results.append(r)
 
-            if r["skipped"]:
-                print(f"[SKIP] {sym} {tf} -> {r['skipped']}")
-            else:
-                print(
-                    f"[DONE] {sym} {tf} | closed={r['closed']} | final_balance={r['final_balance']:.2f} | csv={r['trades_csv']}"
-                )
+                if r["skipped"]:
+                    print(f"[SKIP] {strat_name} | {sym} {tf} -> {r['skipped']}")
+                else:
+                    print(
+                        f"[DONE] {strat_name} | {sym} {tf} | closed={r['closed']} | final={r['final_balance']:.2f} | {r['trades_csv']}"
+                    )
 
     print("\n=== Summary ===")
     for r in results:
         status = "SKIP" if r["skipped"] else "OK"
         print(
-            f"{status:4} | {r['symbol']:4} {r['tf']:3} | closed={r['closed']:3} | final={r['final_balance']:.2f} | {r['trades_csv']}"
+            f"{status:4} | {r['strategy']:7} | {r['symbol']:5} {r['tf']:3} | closed={r['closed']:3} | final={r['final_balance']:.2f} | {r['trades_csv']}"
         )
+
+    # ---- returns ----
+    starting_balance = float(eng.get("paper_balance", 10000.0))
+    compute_returns(results, starting_balance, strategies_to_run, symbols)

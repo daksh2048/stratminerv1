@@ -1,23 +1,46 @@
 engine:
   timeframes: ["5m"]
-  symbols: ["SPY", "NVDA", "GLD","QQQ"]
+  period: "60d"
+  symbols: ["SPY","QQQ","GLD","SLV","AMZN","TSLA","GOOGL"]
   exchange: "yahoo"
+
   paper_balance: 10000.0
   risk_per_trade: 0.005
   slippage_bps: 1.5
   max_loss_pct: 0.03
-  limit: 2000
 
+  # optional: leave this alone unless you want fewer "early bars" trades
+  warmup_bars: 80
 
+  # run these 3
+  strategies_to_run: ["orb","vwap_mr","vwap_tp"]
 
 logging:
   out_dir: "backtests"
 
 strategies:
+  orb:
+    opening_range_minutes: 30
+    risk_reward: 2.0
+    once_per_day: true
+    rth_only: true
+    entry_cutoff_minutes: 60
+    market_tz: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
+
   vwap_mr:
     atr_period: 14
     dev_atr_mult: 1.2
     stop_atr_mult: 1.0
+
+    rth_only: true
+    market_tz: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
+    min_minutes_after_open: 10
+    entry_cutoff_minutes: 300
+    max_trades_per_day: 2
 
     use_regime_filter: true
     ema_period: 50
@@ -28,37 +51,19 @@ strategies:
     runner_rr: 3.0
     trail_pct: 0.003
     move_stop_to_be: true
-  
+
+    use_reentry: false
     reentry_atr_mult: 0.6
-    cooldown_bars: 6
-    min_minutes_after_open: 10
-    require_momentum_confirm: true
 
-  rsi_rev:
-    rsi_period: 14
-    oversold: 30
-    overbought: 70
-
+  vwap_tp:
+    ema_period: 20
     atr_period: 14
     atr_mult: 1.0
-    dev_atr_mult: 0.8
-    rr_cap: 2.0
+    risk_reward: 2.0
 
     rth_only: true
     market_tz: America/New_York
     rth_open: "09:30"
     rth_close: "16:00"
-    min_minutes_after_open: 10
-    entry_cutoff_minutes: 300
+    entry_cutoff_minutes: 240
     max_trades_per_day: 2
-    cooldown_bars: 6
-
-    use_regime_filter: false   # leave off for first run; turn on later
-
-    partial_take_pct: 0.5
-    runner_take_mode: rr
-    runner_rr: 3.0
-    trail_pct: 0.003
-    move_stop_to_be: true
-    dev_atr_mult: 0.8
-    rr_cap: 2.0
