@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -15,252 +15,256 @@ def _as_float(x) -> float:
     return float(x)
 
 
-def _index_to_market_tz(index: pd.DatetimeIndex, market_tz: str) -> pd.DatetimeIndex:
-    """
-    Match the logic already used in your current VWAP MR:
-      - naive -> assume already market_tz
-      - aware -> convert
-    """
-    idx = pd.to_datetime(index)
+def _to_market_tz(idx: pd.DatetimeIndex, market_tz: str) -> pd.DatetimeIndex:
+    idx = pd.to_datetime(idx, errors="coerce")
     if getattr(idx, "tz", None) is None:
-        return idx.tz_localize(market_tz)
+        idx = idx.tz_localize("UTC")
     return idx.tz_convert(market_tz)
 
 
-def _compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Series:
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def _ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def _session_bounds(day_m: pd.Timestamp, rth_open: str, rth_close: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+def _session_bounds(day_m: pd.Timestamp, rth_open: str, rth_close: str) -> Tuple[pd.Timestamp, pd.Timestamp]:
     oh, om = map(int, rth_open.split(":"))
     ch, cm = map(int, rth_close.split(":"))
-    session_open = day_m.normalize() + pd.Timedelta(hours=oh, minutes=om)
-    session_close = day_m.normalize() + pd.Timedelta(hours=ch, minutes=cm)
+    session_open = day_m + pd.Timedelta(hours=oh, minutes=om)
+    session_close = day_m + pd.Timedelta(hours=ch, minutes=cm)
     return session_open, session_close
 
 
-def _vwap_intraday(day_df: pd.DataFrame) -> pd.Series:
-    # Typical price VWAP
-    tp = (day_df["high"] + day_df["low"] + day_df["close"]) / 3.0
-    pv = tp * day_df["volume"]
-    v = day_df["volume"].replace(0, pd.NA)
-    return pv.cumsum() / v.cumsum()
+def _atr(df: pd.DataFrame, period: int) -> pd.Series:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [
+            (df["high"] - df["low"]).abs(),
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.rolling(period, min_periods=period).mean()
+
+
+def _vwap_session(df: pd.DataFrame) -> pd.Series:
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    pv = tp * df["volume"].astype(float)
+    v = df["volume"].astype(float).replace(0.0, pd.NA)
+    cum_pv = pv.cumsum()
+    cum_v = v.cumsum()
+    vwap = (cum_pv / cum_v)
+    return vwap.ffill().infer_objects(copy=False)
 
 
 @dataclass
-class VWAPMRState:
-    day: Optional[pd.Timestamp] = None
+class _DayState:
+    last_day: Optional[pd.Timestamp] = None
     trades_today: int = 0
+    # simplified: just track if we've seen stretch, no strict sequencing
+    stretched_long: bool = False
+    stretched_short: bool = False
 
 
 class VWAPMeanReversion(Strategy):
     """
-    VWAP Mean Reversion v2 (drop-in)
-
-    Goal: stop catching falling knives.
-    Default behavior:
-      - Only trade in *non-trending* regimes (EMA slope small)
-      - Only enter after "stretch -> re-entry" (NOT just a 1-bar reversal)
-      - Limit to 1 trade/day/symbol by default
-      - Avoid first N minutes after open
+    VWAP Mean Reversion (intraday)
+    
+    Simplified logic:
+      - Price stretches beyond outer band (VWAP ± band_atr_mult * ATR)
+      - Then reclaims back inside the band with momentum
+      - Target is VWAP
+    
+    No strict "must be inside first" state machine - just stretch + reclaim.
     """
 
     def __init__(self, name: str = "vwap_mr", **params) -> None:
         super().__init__(name, **params)
-        self._state_by_symbol: dict[str, VWAPMRState] = {}
+        self._state: Dict[str, _DayState] = {}
 
-    def _get_state(self, symbol: str) -> VWAPMRState:
-        if symbol not in self._state_by_symbol:
-            self._state_by_symbol[symbol] = VWAPMRState()
-        return self._state_by_symbol[symbol]
+    def _get_state(self, symbol: str) -> _DayState:
+        if symbol not in self._state:
+            self._state[symbol] = _DayState()
+        return self._state[symbol]
 
     def on_candles(self, df: pd.DataFrame, symbol: str) -> Order:
-        # ---- params ----
-        atr_period = int(self.params.get("atr_period", 14))
-        ema_period = int(self.params.get("ema_period", 50))
-
-        # MR trigger bands
-        stretch_atr_mult = float(self.params.get("stretch_atr_mult", 1.4))   # must stretch THIS far first
-        reentry_atr_mult = float(self.params.get("reentry_atr_mult", 0.6))   # then re-enter to THIS band
-
-        stop_atr_mult = float(self.params.get("stop_atr_mult", 1.0))
-
-        # regime filter: "range only"
-        use_regime_filter = bool(self.params.get("use_regime_filter", True))
-        ema_slope_max_atr = float(self.params.get("ema_slope_max_atr", 0.18))
-
-        # session
+        # --- params ---
         market_tz = str(self.params.get("market_tz", "America/New_York"))
-        rth_only = bool(self.params.get("rth_only", True))
         rth_open = str(self.params.get("rth_open", "09:30"))
         rth_close = str(self.params.get("rth_close", "16:00"))
-        min_minutes_after_open = int(self.params.get("min_minutes_after_open", 15))
-        entry_cutoff_minutes = self.params.get("entry_cutoff_minutes", 240)
-        entry_cutoff_minutes = None if entry_cutoff_minutes is None else int(entry_cutoff_minutes)
+        
+        atr_period = int(self.params.get("atr_period", 14))
+        band_atr_mult = float(self.params.get("band_atr_mult", 1.5))
+        
+        min_minutes_after_open = int(self.params.get("min_minutes_after_open", 20))
+        max_minutes_after_open = int(self.params.get("max_minutes_after_open", 180))
+        
+        rr = float(self.params.get("rr", 1.5))
+        stop_atr_mult = float(self.params.get("stop_atr_mult", 1.0))
+        
+        reclaim_bars = int(self.params.get("reclaim_bars", 3))
+        reclaim_threshold = float(self.params.get("reclaim_threshold", 0.66))
+        
+        max_trades_per_day = int(self.params.get("max_trades_per_day", 2))
 
-        max_trades_per_day = int(self.params.get("max_trades_per_day", 1))
-
-        # per-trade hard cap (optional; broker is account-level)
-        max_stop_pct = float(self.params.get("max_stop_pct", 0.03))
-
-        warmup = max(atr_period + 20, ema_period + 5)
+        # CRITICAL FIX: Use smaller warmup for HTF
+        warmup = max(atr_period + 5, 20)
         if df is None or len(df) < warmup:
-            return Order(symbol, None, None, None, None, "not enough candles", {})
+            return Order(symbol, None, None, None, None, "warmup", {})
 
-        # ---- build today's session slice ----
-        idx_m = _index_to_market_tz(df.index, market_tz)
+        if "volume" not in df.columns:
+            return Order(symbol, None, None, None, None, "missing volume", {})
+
+        # --- timezone conversion ---
+        idx_m = _to_market_tz(df.index, market_tz)
         last_ts_m = idx_m[-1]
         day_m = last_ts_m.normalize()
+        
+        session_open, session_close = _session_bounds(day_m, rth_open, rth_close)
 
-        if rth_only:
-            session_open, session_close = _session_bounds(day_m, rth_open, rth_close)
-            in_today = (idx_m.normalize() == day_m)
-            in_session = (idx_m >= session_open) & (idx_m <= session_close)
-            day_df = df.loc[in_today & in_session]
-            if day_df.empty:
-                return Order(symbol, None, None, None, None, "no RTH candles", {})
-        else:
-            day_df = df.copy()
-            session_open = day_m.normalize()
-            session_close = day_m.normalize() + pd.Timedelta(hours=23, minutes=59)
+        # CRITICAL FIX: Calculate indicators on TODAY'S full data (pre-market + RTH)
+        # This gives enough bars for HTF, but we only TRADE during RTH
+        in_today = idx_m.normalize() == day_m
+        day_df = df.loc[in_today].copy()
+        day_idx_m = idx_m[in_today]
+        
+        if day_df.empty or len(day_df) < warmup:
+            return Order(symbol, None, None, None, None, "not enough bars today", {})
 
-        # wait after open
-        if min_minutes_after_open > 0:
-            if last_ts_m < (session_open + pd.Timedelta(minutes=min_minutes_after_open)):
-                return Order(symbol, None, None, None, None, "too early after open", {"ts": str(last_ts_m)})
+        # --- time window gate (ONLY TRADE DURING RTH) ---
+        if last_ts_m < session_open or last_ts_m > session_close:
+            return Order(symbol, None, None, None, None, "outside RTH", {})
+        
+        mins_from_open = (last_ts_m - session_open).total_seconds() / 60.0
+        if mins_from_open < min_minutes_after_open:
+            return Order(symbol, None, None, None, None, "too early", {"mins_from_open": mins_from_open})
+        if mins_from_open > max_minutes_after_open:
+            return Order(symbol, None, None, None, None, "past MR window", {"mins_from_open": mins_from_open})
 
-        # cutoff
-        if entry_cutoff_minutes is not None:
-            cutoff_ts = session_open + pd.Timedelta(minutes=entry_cutoff_minutes)
-            if last_ts_m > cutoff_ts:
-                return Order(symbol, None, None, None, None, "past entry cutoff", {"ts": str(last_ts_m)})
-
-        # day state / trade limit
+        # --- state management ---
         st = self._get_state(symbol)
-        if st.day is None or st.day != day_m:
-            st.day = day_m
+        if st.last_day is None or st.last_day != day_m:
+            st.last_day = day_m
             st.trades_today = 0
+            st.stretched_long = False
+            st.stretched_short = False
+
         if st.trades_today >= max_trades_per_day:
-            return Order(symbol, None, None, None, None, "max trades/day reached", {"day": str(day_m)})
+            return Order(symbol, None, None, None, None, "max trades/day", {"trades_today": st.trades_today})
 
-        if len(day_df) < max(ema_period, atr_period) + 3:
-            return Order(symbol, None, None, None, None, "not enough session candles", {})
+        # --- indicators ---
+        vwap = _vwap_session(day_df)
+        atr = _atr(day_df, atr_period)
 
-        # ---- indicators on session slice ----
-        vwap = _vwap_intraday(day_df)
-        ema = _ema(day_df["close"], ema_period)
-        atr = _compute_atr(day_df["high"], day_df["low"], day_df["close"], atr_period)
+        if pd.isna(vwap.iloc[-1]) or pd.isna(atr.iloc[-1]):
+            return Order(symbol, None, None, None, None, "vwap/atr not ready", {})
 
-        if pd.isna(atr.iloc[-1]) or atr.iloc[-1] <= 0:
-            return Order(symbol, None, None, None, None, "ATR not ready", {})
+        v = _as_float(vwap.iloc[-1])
+        a = _as_float(atr.iloc[-1])
 
-        atr_now = float(atr.iloc[-1])
-        vwap_now = float(vwap.iloc[-1])
-        ema_now = float(ema.iloc[-1])
-        ema_prev = float(ema.iloc[-2])
-        ema_slope_atr = (ema_now - ema_prev) / atr_now
+        if a <= 0:
+            return Order(symbol, None, None, None, None, "invalid ATR", {"atr": a})
 
-        # regime filter: avoid trends
-        if use_regime_filter and abs(ema_slope_atr) > ema_slope_max_atr:
-            return Order(symbol, None, None, None, None, "regime: trending (skip MR)", {"ema_slope_atr": ema_slope_atr})
+        upper_band = v + band_atr_mult * a
+        lower_band = v - band_atr_mult * a
 
-        last = day_df.iloc[-1]
-        prev = day_df.iloc[-2]
+        # --- recent bars for reclaim ---
+        if len(day_df) < reclaim_bars + 1:
+            return Order(symbol, None, None, None, None, "not enough bars for reclaim", {})
 
-        last_close = _as_float(last["close"])
-        last_open = _as_float(last["open"])
-        last_high = _as_float(last["high"])
-        last_low = _as_float(last["low"])
+        recent = day_df.iloc[-reclaim_bars:]
+        lows = recent["low"].astype(float).values
+        highs = recent["high"].astype(float).values
+        closes = recent["close"].astype(float).values
+        opens = recent["open"].astype(float).values
 
-        prev_close = _as_float(prev["close"])
+        last_close = _as_float(day_df["close"].iloc[-1])
+        last_low = _as_float(day_df["low"].iloc[-1])
+        last_high = _as_float(day_df["high"].iloc[-1])
 
-        # deviation in ATR units
-        dev_down = (vwap_now - last_close) / atr_now
-        dev_up = (last_close - vwap_now) / atr_now
+        # --- detect stretch ---
+        prev_close = _as_float(day_df["close"].iloc[-2])
+        
+        if prev_close < lower_band:
+            st.stretched_long = True
+        if prev_close > upper_band:
+            st.stretched_short = True
 
-        # bands
-        band_long = vwap_now - reentry_atr_mult * atr_now
-        band_short = vwap_now + reentry_atr_mult * atr_now
-
-        # stretch bands (must have stretched first)
-        stretch_long = vwap_now - stretch_atr_mult * atr_now
-        stretch_short = vwap_now + stretch_atr_mult * atr_now
-
-        # ---- LONG MR: stretch below, then re-enter band with bullish candle ----
-        long_ok = (prev_close <= stretch_long) and (last_close >= band_long) and (last_close < vwap_now)
-        long_confirm = (last_close > last_open)  # bullish body
-        if long_ok and long_confirm:
-            entry = last_close
-            stop = min(last_low, entry) - stop_atr_mult * atr_now
-
-            # hard cap stop distance (optional)
-            min_stop = entry * (1.0 - max_stop_pct)
-            stop = max(stop, min_stop)
-
-            take = vwap_now
-
-            if stop < entry and take > entry:
+        # --- LONG setup: stretched below, now reclaim with momentum ---
+        if st.stretched_long:
+            # reclaim: touched below band, now close back above
+            touched_below = min(lows) <= lower_band
+            reclaimed_above = last_close > lower_band
+            
+            # momentum: majority of recent bars are bullish
+            bullish_count = sum(closes[i] > opens[i] for i in range(len(closes)))
+            has_momentum = (bullish_count / len(closes)) >= reclaim_threshold
+            
+            if touched_below and reclaimed_above and has_momentum:
+                entry = last_close
+                stop = min(last_low, lower_band) - stop_atr_mult * a
+                
+                if stop >= entry:
+                    return Order(symbol, None, None, None, None, "invalid long stop", {"stop": stop, "entry": entry})
+                
+                # target VWAP (mean reversion), fallback to RR
+                take = v
+                if take <= entry:
+                    take = entry + rr * (entry - stop)
+                
+                st.stretched_long = False
                 st.trades_today += 1
+                
                 return Order(
                     symbol=symbol,
                     side="buy",
                     entry=entry,
                     stop=stop,
                     take=take,
-                    reason="VWAP MR long v2 (stretch->reentry, range regime)",
+                    reason="VWAP MR long (stretch->reclaim)",
                     meta={
-                        "vwap": vwap_now,
-                        "atr": atr_now,
-                        "ema": ema_now,
-                        "ema_slope_atr": ema_slope_atr,
-                        "dev_atr": dev_down,
-                        "stretch_atr_mult": stretch_atr_mult,
-                        "reentry_atr_mult": reentry_atr_mult,
-                        "max_stop_pct": max_stop_pct,
+                        "vwap": v,
+                        "atr": a,
+                        "lower_band": lower_band,
+                        "upper_band": upper_band,
+                        "bullish_ratio": bullish_count / len(closes),
+                        "mins_from_open": mins_from_open,
                     },
                 )
 
-        # ---- SHORT MR: stretch above, then re-enter band with bearish candle ----
-        short_ok = (prev_close >= stretch_short) and (last_close <= band_short) and (last_close > vwap_now)
-        short_confirm = (last_close < last_open)  # bearish body
-        if short_ok and short_confirm:
-            entry = last_close
-            stop = max(last_high, entry) + stop_atr_mult * atr_now
-
-            # hard cap stop distance (optional)
-            max_stop = entry * (1.0 + max_stop_pct)
-            stop = min(stop, max_stop)
-
-            take = vwap_now
-
-            if stop > entry and take < entry:
+        # --- SHORT setup: stretched above, now reclaim with momentum ---
+        if st.stretched_short:
+            touched_above = max(highs) >= upper_band
+            reclaimed_below = last_close < upper_band
+            
+            bearish_count = sum(closes[i] < opens[i] for i in range(len(closes)))
+            has_momentum = (bearish_count / len(closes)) >= reclaim_threshold
+            
+            if touched_above and reclaimed_below and has_momentum:
+                entry = last_close
+                stop = max(last_high, upper_band) + stop_atr_mult * a
+                
+                if stop <= entry:
+                    return Order(symbol, None, None, None, None, "invalid short stop", {"stop": stop, "entry": entry})
+                
+                take = v
+                if take >= entry:
+                    take = entry - rr * (stop - entry)
+                
+                st.stretched_short = False
                 st.trades_today += 1
+                
                 return Order(
                     symbol=symbol,
                     side="sell",
                     entry=entry,
                     stop=stop,
                     take=take,
-                    reason="VWAP MR short v2 (stretch->reentry, range regime)",
+                    reason="VWAP MR short (stretch->reclaim)",
                     meta={
-                        "vwap": vwap_now,
-                        "atr": atr_now,
-                        "ema": ema_now,
-                        "ema_slope_atr": ema_slope_atr,
-                        "dev_atr": dev_up,
-                        "stretch_atr_mult": stretch_atr_mult,
-                        "reentry_atr_mult": reentry_atr_mult,
-                        "max_stop_pct": max_stop_pct,
+                        "vwap": v,
+                        "atr": a,
+                        "lower_band": lower_band,
+                        "upper_band": upper_band,
+                        "bearish_ratio": bearish_count / len(closes),
+                        "mins_from_open": mins_from_open,
                     },
                 )
 
-        return Order(symbol, None, None, None, None, "no setup", {"dev_down": dev_down, "dev_up": dev_up, "vwap": vwap_now})
+        return Order(symbol, None, None, None, None, "no MR setup", {})

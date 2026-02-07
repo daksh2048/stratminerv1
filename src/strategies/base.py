@@ -11,3 +11,5 @@ class Strategy(ABC):
     @abstractmethod
     def on_candles(self, df: pd.DataFrame, symbol:str) -> Order:
         ...
+
+BaseStrategy = Strategy

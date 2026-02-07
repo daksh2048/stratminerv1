@@ -264,7 +264,7 @@ def compute_returns(results: list[dict], starting_balance: float, strategies: li
 # Main
 # -----------------------------
 if __name__ == "__main__":
-    with open("config.yaml", "r") as f:
+    with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     eng = cfg["engine"]

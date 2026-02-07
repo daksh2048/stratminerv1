@@ -78,7 +78,9 @@ class PaperBroker:
             return float(price) * (1 - factor)
 
     def _log_closed_position(self, pos: Position) -> None:
-        risk_dollars = abs(pos.entry - pos.stop) * pos.size
+        # FIX: Use initial_stop for accurate R calculation
+        initial_stop = float(pos.meta.get("initial_stop", pos.stop))
+        risk_dollars = abs(pos.entry - initial_stop) * pos.size
         R = (pos.pnl / risk_dollars) if (risk_dollars and risk_dollars > 0) else 0.0
 
         if pos.pnl > 0:
@@ -232,6 +234,8 @@ class PaperBroker:
         Create a Position from a strategy Order and add it to open positions.
         Size is based on risk_per_trade * current balance.
         Limits to one open position per (symbol, strategy).
+        
+        FIXED: Now applies slippage BEFORE calculating position size.
         """
         # kill-switch
         if (not self.trading_enabled) or self._breached_max_loss():
@@ -254,16 +258,24 @@ class PaperBroker:
         stop_price = float(order.stop)
         take_price = float(order.take)
 
-        # risk per unit
-        risk_per_unit = (entry_price - stop_price) if side == "buy" else (stop_price - entry_price)
+        # FIX: Apply slippage FIRST, before calculating size
+        entry_price_slipped = self._apply_slippage(entry_price, side)
+
+        # FIX: Validate stop/take make sense relative to entry
+        if side == "buy":
+            if stop_price >= entry_price_slipped or take_price <= entry_price_slipped:
+                return None  # Invalid long setup
+        else:
+            if stop_price <= entry_price_slipped or take_price >= entry_price_slipped:
+                return None  # Invalid short setup
+
+        # FIX: Now calculate size with CORRECT slipped entry
+        risk_per_unit = (entry_price_slipped - stop_price) if side == "buy" else (stop_price - entry_price_slipped)
         if risk_per_unit <= 0:
             return None
 
         risk_amount = self.balance * self.risk_per_trade
         size = risk_amount / risk_per_unit
-
-        # slippage on entry
-        entry_price_slipped = self._apply_slippage(entry_price, side)
 
         pos = Position(
             symbol=order.symbol,
@@ -274,7 +286,7 @@ class PaperBroker:
             take=take_price,
             open_time=now,
             strategy=strategy,
-            meta=order.meta.copy(),
+            meta=order.meta.copy() if order.meta else {},
         )
 
         # defaults / anchors
@@ -322,16 +334,19 @@ class PaperBroker:
                 if (not activate_after_partial) or partial_done:
                     meta["trail_active"] = True
 
+            # FIX: Ensure peak/trough exist before using
             if bool(meta.get("trail_active", False)) and trail_pct is not None and float(trail_pct) > 0:
                 tpct = float(trail_pct)
                 if pos.side == "buy":
-                    meta["peak"] = max(float(meta.get("peak", pos.entry)), high)
+                    current_peak = float(meta.get("peak", pos.entry))
+                    meta["peak"] = max(current_peak, high)
                     peak = float(meta["peak"])
                     new_stop = peak * (1.0 - tpct)
                     if new_stop > pos.stop:
                         pos.stop = new_stop
                 else:
-                    meta["trough"] = min(float(meta.get("trough", pos.entry)), low)
+                    current_trough = float(meta.get("trough", pos.entry))
+                    meta["trough"] = min(current_trough, low)
                     trough = float(meta["trough"])
                     new_stop = trough * (1.0 + tpct)
                     if new_stop < pos.stop:

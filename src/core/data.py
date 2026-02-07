@@ -2,12 +2,49 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal, Optional
+from pathlib import Path
+import hashlib
+import pickle
+import time
 
 import pandas as pd
 import yfinance as yf
 
 
 Timeframe = Literal["1m", "5m", "15m", "30m", "1h", "1d"]
+
+
+def _validate_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Validate OHLCV data and drop invalid bars.
+    Checks for:
+    - High < Low
+    - Close outside High/Low range
+    - Open outside High/Low range
+    - Negative/zero prices
+    - Negative volume
+    """
+    if df is None or df.empty:
+        return df
+
+    invalid = (
+        (df["high"] < df["low"]) |
+        (df["close"] > df["high"]) |
+        (df["close"] < df["low"]) |
+        (df["open"] > df["high"]) |
+        (df["open"] < df["low"]) |
+        (df["high"] <= 0) |
+        (df["low"] <= 0) |
+        (df["close"] <= 0) |
+        (df["open"] <= 0) |
+        (df["volume"] < 0)
+    )
+
+    if invalid.sum() > 0:
+        print(f"⚠️  Data validation: Dropped {invalid.sum()} invalid OHLCV bars")
+        df = df[~invalid].copy()
+
+    return df
 
 
 def _normalize_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -108,6 +145,12 @@ def _normalize_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
         index=df.index,
     ).dropna()
 
+    # Remove duplicate timestamps if any
+    if out.index.duplicated().any():
+        n_dupes = out.index.duplicated().sum()
+        print(f"⚠️  Removed {n_dupes} duplicate timestamps (kept last)")
+        out = out[~out.index.duplicated(keep='last')]
+
     out.index.name = "ts"
     return out
 
@@ -143,19 +186,58 @@ class CandleFeed:
             else:
                 period = "5y"
 
-        data = yf.download(
-            self.symbol,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-        )
+        # Cache setup
+        cache_dir = Path("data_cache")
+        cache_dir.mkdir(exist_ok=True)
+        cache_key = hashlib.md5(f"{self.symbol}_{interval}_{period}".encode()).hexdigest()
+        cache_file = cache_dir / f"{cache_key}.pkl"
+
+        # Check cache (24hr expiry)
+        if cache_file.exists():
+            age = time.time() - cache_file.stat().st_mtime
+            if age < 86400:  # 24 hours
+                try:
+                    with open(cache_file, "rb") as f:
+                        df = pickle.load(f)
+                        if limit is not None:
+                            df = df.tail(int(limit)).copy()
+                        return df
+                except Exception as e:
+                    print(f"⚠️  Cache read failed for {self.symbol}, re-downloading: {e}")
+                    # Continue to download if cache read fails
+
+        # Download
+        try:
+            data = yf.download(
+                self.symbol,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=True,  # Use auto_adjust=True for clean continuous prices
+                threads=True,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to download data for {self.symbol}: {e}")
 
         if data is None or data.empty:
             raise RuntimeError(f"No data returned for {self.symbol} interval={interval} period={period}")
 
         df = _normalize_yf_columns(data)
+        df = _validate_ohlcv(df)
+
+        # Log what we got
+        if not df.empty:
+            print(f"✓ Fetched {self.symbol} {interval}: {len(df)} bars from {df.index[0]} to {df.index[-1]}")
+        else:
+            print(f"⚠️  No valid data for {self.symbol} {interval} after validation")
+
+        # Save to cache
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump(df, f)
+        except Exception as e:
+            print(f"⚠️  Cache write failed for {self.symbol}: {e}")
+            # Continue even if caching fails
 
         if limit is not None:
             df = df.tail(int(limit)).copy()

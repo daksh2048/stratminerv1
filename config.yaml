@@ -1,5 +1,5 @@
 engine:
-  timeframes: ["5m"]
+  timeframes: ["5m","15m","30m","1h"]
   period: "60d"
   symbols: ["SPY","QQQ","GLD","SLV","AMZN","TSLA","GOOGL","AAPL"]
   exchange: "yahoo"
@@ -13,7 +13,7 @@ engine:
   warmup_bars: 80
 
   # run these 3
-  strategies_to_run: ["orb","vwap_mr","vwap_tp"]
+  strategies_to_run: ["vwap_mr","vwap_tp"]
 
 logging:
   out_dir: "backtests"
@@ -30,40 +30,59 @@ strategies:
     rth_close: "16:00"
 
   vwap_mr:
+    # ATR-based bands
     atr_period: 14
-    dev_atr_mult: 1.2
+    band_atr_mult: 1.5      # outer band (wider for more signals)
+    
+    # Reclaim confirmation
+    reclaim_bars: 3
+    reclaim_threshold: 0.66 # need 66% of bars directional (not 100%)
+    
+    # Time window (only trades during these times)
+    min_minutes_after_open: 20
+    max_minutes_after_open: 180  # 3 hours
+    
+    # Stops/targets
     stop_atr_mult: 1.0
-
-    rth_only: true
-    market_tz: America/New_York
+    rr: 1.5
+    
+    # Limits
+    max_trades_per_day: 2
+    
+    # Market hours (indicators calculated on full day, trades only in RTH)
+    market_tz: "America/New_York"
     rth_open: "09:30"
     rth_close: "16:00"
-    min_minutes_after_open: 10
-    entry_cutoff_minutes: 300
-    max_trades_per_day: 2
-
-    use_regime_filter: true
-    ema_period: 50
-    ema_slope_max_atr: 0.25
-
-    partial_take_pct: 0.5
-    runner_take_mode: "rr"
-    runner_rr: 3.0
-    trail_pct: 0.003
-    move_stop_to_be: true
-
-    use_reentry: false
-    reentry_atr_mult: 0.6
-
+  
+  
+  # ----------------------------------------
+  # VWAP Trend Pullback (FIXED FOR HTF)
+  # ----------------------------------------
   vwap_tp:
+    # Indicators
     ema_period: 20
     atr_period: 14
-    atr_mult: 1.0
+    
+    # Trend filter (disabled by default - enable only for 5m if desired)
+    use_trend_filter: false
+    ema_slope_min_atr: 0.08
+    
+    # Pullback & reclaim
+    pullback_bars: 4
+    reclaim_threshold: 0.66
+    
+    # Stops/targets
+    stop_atr_mult: 1.2
     risk_reward: 2.0
-
-    rth_only: true
-    market_tz: America/New_York
+    
+    # Time window (only trades during these times)
+    min_minutes_after_open: 15
+    entry_cutoff_minutes: 240
+    
+    # Limits
+    max_trades_per_day: 2
+    
+    # Market hours (indicators calculated on full day, trades only in RTH)
+    market_tz: "America/New_York"
     rth_open: "09:30"
     rth_close: "16:00"
-    entry_cutoff_minutes: 240
-    max_trades_per_day: 2
