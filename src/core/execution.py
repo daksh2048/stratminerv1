@@ -61,6 +61,7 @@ class PaperBroker:
 
         self.open_positions: List[Position] = []
         self.closed_positions: List[Position] = []
+        self._candle_buffer: Dict[str, list] = {}  # symbol -> last 50 candles for hybrid trailing
 
     def _breached_max_loss(self) -> bool:
         return self.balance <= self.initial_balance * (1.0 - self.max_loss_pct)
@@ -304,6 +305,13 @@ class PaperBroker:
         return pos
 
     def update_with_candle(self, candle: pd.Series, now: Any, symbol: str, tf: str):
+        # Maintain rolling candle buffer for hybrid trailing (last 50 bars)
+        if symbol not in self._candle_buffer:
+            self._candle_buffer[symbol] = []
+        self._candle_buffer[symbol].append(candle)
+        if len(self._candle_buffer[symbol]) > 50:
+            self._candle_buffer[symbol].pop(0)
+
         # include open for gap logic; fallback to close if missing
         close = _to_float(candle["close"])
         open_ = _to_float(candle["open"]) if "open" in candle else close
@@ -354,6 +362,11 @@ class PaperBroker:
                         if atr_current is not None:
                             atr_current = float(atr_current)
                     
+                    # Build df_recent from candle buffer for hybrid mode
+                    df_recent = None
+                    if trail_mode == "hybrid" and symbol in self._candle_buffer and len(self._candle_buffer[symbol]) >= 5:
+                        df_recent = pd.DataFrame(self._candle_buffer[symbol])
+
                     # Call advanced trailing
                     new_stop = calculate_trailing_stop(
                         pos_side=pos.side,
@@ -362,7 +375,7 @@ class PaperBroker:
                         candle_high=high,
                         candle_low=low,
                         meta=meta,
-                        df_recent=None,
+                        df_recent=df_recent,
                         atr_current=atr_current,
                     )
                     

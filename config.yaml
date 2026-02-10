@@ -1,5 +1,5 @@
 engine:
-  timeframes: ["5m","15m","30m","1h"]
+  timeframes: ["5m"]
   period: "60d"
   symbols: ["SPY"]
   exchange: "yahoo"
@@ -23,18 +23,19 @@ strategies:
     market_tz: America/New_York
     rth_open: "09:30"
     rth_close: "16:00"
-    min_minutes_after_open: 30
+    min_minutes_after_open: 60
     entry_cutoff_minutes: 240
     htf_timeframe: 1h
-    htf_ema_period: 20
-    swing_window: 5
+    htf_ema_period: 50
+    swing_window: 10
     atr_period: 14
-    stop_atr_mult: 1.5
-    risk_reward: 2.5
-    min_atr: 0.10
-    max_trades_per_day: 2
-    trail_mode: atr
+    stop_atr_mult: 2.5
+    risk_reward: 2.0
+    min_atr: 0.15
+    max_trades_per_day: 3
+    trail_mode: hybrid
     trail_atr_mult: 2.0
+    trail_pct: 0.02
 
   # ========================================
   # ORB - Uses Chandelier Trailing

@@ -131,7 +131,7 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
 
         broker.update_with_candle(candle, now, sym, tf)
 
-        context = df.iloc[:i]
+        context = df.iloc[max(0, i-200):i]
         order = strat.on_candles(context, sym)
 
         if order is None or order.side not in ("buy", "sell"):

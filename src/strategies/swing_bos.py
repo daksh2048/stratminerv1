@@ -38,33 +38,17 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.S
 
 
 def _detect_swing_highs(high: pd.Series, window: int) -> pd.Series:
-    """
-    Detect swing highs: bar where high > all bars within window on both sides.
-    Returns boolean Series.
-    """
-    swings = pd.Series(False, index=high.index)
-    for i in range(window, len(high) - window):
-        current = high.iloc[i]
-        left = high.iloc[i-window:i]
-        right = high.iloc[i+1:i+window+1]
-        if current > left.max() and current > right.max():
-            swings.iloc[i] = True
-    return swings
+    """Vectorized swing high detection using rolling max."""
+    roll_left = high.shift(1).rolling(window).max()
+    roll_right = high.shift(-window).rolling(window).max()
+    return (high > roll_left) & (high > roll_right)
 
 
 def _detect_swing_lows(low: pd.Series, window: int) -> pd.Series:
-    """
-    Detect swing lows: bar where low < all bars within window on both sides.
-    Returns boolean Series.
-    """
-    swings = pd.Series(False, index=low.index)
-    for i in range(window, len(low) - window):
-        current = low.iloc[i]
-        left = low.iloc[i-window:i]
-        right = low.iloc[i+1:i+window+1]
-        if current < left.min() and current < right.min():
-            swings.iloc[i] = True
-    return swings
+    """Vectorized swing low detection using rolling min."""
+    roll_left = low.shift(1).rolling(window).min()
+    roll_right = low.shift(-window).rolling(window).min()
+    return (low < roll_left) & (low < roll_right)
 
 
 @dataclass
@@ -136,28 +120,33 @@ class SwingBOS(Strategy):
         st = self._get_state(symbol)
         htf_timeframe = str(self.params.get("htf_timeframe", "1h"))
         
-        # Check cache validity (1 hour)
+        # Cache: only re-fetch once per trading DAY (not per simulated hour)
+        # Comparing hours on historical timestamps causes ~400 API calls per symbol
+        current_day = ltf_last_ts.normalize()
         if st.htf_cache is not None and st.htf_last_update is not None:
-            cache_age_hours = (ltf_last_ts - st.htf_last_update).total_seconds() / 3600
-            if cache_age_hours < 1.0:
-                htf_df = st.htf_cache
+            last_day = st.htf_last_update.normalize()
+            if current_day <= last_day:
+                htf_df = st.htf_cache  # same day - use cache
             else:
-                # Re-fetch HTF data
+                # new trading day - re-fetch
                 try:
                     feed = CandleFeed(exchange="yahoo", symbol=symbol, timeframe=htf_timeframe)
                     htf_df = feed.fetch(period="60d", limit=100)
                     st.htf_cache = htf_df
                     st.htf_last_update = ltf_last_ts
-                except Exception as e:
-                    return None
+                except Exception:
+                    htf_df = st.htf_cache  # fall back to stale cache on error
         else:
-            # First fetch
+            # First fetch (once per symbol per backtest run)
             try:
+                print(f"  [BOS] Fetching HTF ({htf_timeframe}) for {symbol}...", end="", flush=True)
                 feed = CandleFeed(exchange="yahoo", symbol=symbol, timeframe=htf_timeframe)
                 htf_df = feed.fetch(period="60d", limit=100)
                 st.htf_cache = htf_df
                 st.htf_last_update = ltf_last_ts
+                print(f" done ({len(htf_df)} bars)")
             except Exception as e:
+                print(f" FAILED: {e}")
                 return None
 
         if htf_df is None or htf_df.empty:
@@ -168,18 +157,24 @@ class SwingBOS(Strategy):
         # Calculate HTF EMA
         htf_ema = _ema(htf_df["close"].astype(float), htf_ema_period)
         
-        if pd.isna(htf_ema.iloc[-1]):
+        if pd.isna(htf_ema.iloc[-1]) or len(htf_ema) < 5:
             return None
         
         last_close = _as_float(htf_df["close"].iloc[-1])
-        last_ema = _as_float(htf_ema.iloc[-1])
+        last_ema   = _as_float(htf_ema.iloc[-1])
+        prev_ema   = _as_float(htf_ema.iloc[-4])   # 3 bars ago = EMA slope direction
         
-        # Determine bias
-        if last_close > last_ema:
+        ema_rising  = last_ema > prev_ema
+        ema_falling = last_ema < prev_ema
+        
+        # Require BOTH: price on correct side AND EMA sloping that way
+        # This prevents single-candle flips from changing bias
+        if last_close > last_ema and ema_rising:
             return "bullish"
-        elif last_close < last_ema:
+        elif last_close < last_ema and ema_falling:
             return "bearish"
         
+        # Conflicting signal (e.g. price above EMA but EMA still falling) = no trade
         return None
 
     def on_candles(self, df: pd.DataFrame, symbol: str) -> Order:
@@ -205,6 +200,10 @@ class SwingBOS(Strategy):
         warmup = max(atr_period + swing_window * 2, 50)
         if df is None or len(df) < warmup:
             return Order(symbol, None, None, None, None, "warmup", {})
+
+        # CRITICAL: Cap df to last N bars - prevents O(n^2) slowdown
+        max_lookback = max(atr_period * 3, swing_window * 4 + 100)
+        df = df.iloc[-max_lookback:]
 
         # --- Timezone conversion ---
         idx_m = _to_market_tz(df.index, market_tz)
@@ -247,7 +246,7 @@ class SwingBOS(Strategy):
         # --- HTF Bias ---
         htf_bias = self._fetch_htf_bias(symbol, last_ts_m, market_tz)
         if htf_bias is None:
-            return Order(symbol, None, None, None, None, "HTF bias not ready", {})
+            return Order(symbol, None, None, None, None, "HTF no clear bias", {})
 
         # --- LTF Indicators ---
         atr = _atr(
