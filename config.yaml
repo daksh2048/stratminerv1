@@ -13,7 +13,7 @@ engine:
   warmup_bars: 80
 
   # run these 3
-  strategies_to_run: ["swing_bos"]
+  strategies_to_run: ["vwap_mr","vwap_tp"]
 
 logging:
   out_dir: "backtests"
@@ -55,9 +55,10 @@ strategies:
     once_per_day: true
     rth_only: true
     entry_cutoff_minutes: 60
-    trail_mode: hybrid
+    trail_mode: period
     trail_atr_mult: 2.5
     trail_lookback: 10
+    trail_pct: 0.02
 
   # ========================================
   # VWAP MR - Uses Tiered Trailing
@@ -98,7 +99,7 @@ strategies:
     pullback_bars: 4
     reclaim_threshold: 0.66
     max_trades_per_day: 2
-    trail_mode: percent
+    trail_mode: tiered
     trail_pct: 0.02
 
 logging:

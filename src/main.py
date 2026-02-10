@@ -13,21 +13,9 @@ from src.strategies.swing_bos import SwingBOS
 
 
 TRADES_HEADER = [
-    "symbol",
-    "side",
-    "size",
-    "entry",
-    "stop",
-    "take",
-    "open_time",
-    "close_time",
-    "exit_price",
-    "pnl",
-    "R",
-    "result",
-    "strategy",
-    "status",
-    "balance",
+    "symbol", "side", "size", "entry", "stop", "take",
+    "open_time", "close_time", "exit_price", "pnl", "R",
+    "result", "strategy", "status", "balance",
 ]
 
 
@@ -54,8 +42,7 @@ def tf_minutes(tf: str) -> int:
 
 
 def opening_minutes_to_or_bars(opening_range_minutes: int, ltf: str) -> int:
-    mins = tf_minutes(ltf)
-    return max(1, int(math.ceil(opening_range_minutes / mins)))
+    return max(1, int(math.ceil(opening_range_minutes / tf_minutes(ltf))))
 
 
 def make_strategy(name: str, cfg: dict, tf: str):
@@ -80,24 +67,24 @@ def make_strategy(name: str, cfg: dict, tf: str):
     raise ValueError(f"Unknown strategy: {name}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Core backtest runner
+# ─────────────────────────────────────────────────────────────────────────────
 def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
-    eng = cfg["engine"]
+    eng     = cfg["engine"]
     log_cfg = cfg.get("logging", {}) or {}
 
     period = str(eng.get("period", "60d"))
-    limit = eng.get("limit", None)  # optional tail, usually None for full period
+    limit  = eng.get("limit", None)
 
     strat = make_strategy(strategy_name, cfg, tf)
 
-    # ---- Data ----
     feed = CandleFeed(exchange=eng.get("exchange", "yahoo"), symbol=sym, timeframe=tf)
-    df = feed.fetch(period=period, limit=limit).sort_index()
+    df   = feed.fetch(period=period, limit=limit).sort_index()
 
-    # ---- Fresh broker per run ----
-    out_dir = log_cfg.get("out_dir", "backtests")
+    out_dir     = log_cfg.get("out_dir", "backtests")
     trades_path = os.path.join(out_dir, f"trades_{strategy_name}_{sym}_{tf}.csv")
 
-    # overwrite output each run
     if os.path.exists(trades_path):
         os.remove(trades_path)
     ensure_csv_header(trades_path)
@@ -115,31 +102,26 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
     warmup = int(eng.get("warmup_bars", 80))
     if len(df) <= warmup:
         return {
-            "strategy": strategy_name,
-            "symbol": sym,
-            "tf": tf,
-            "trades_csv": trades_path,
-            "final_balance": broker.balance,
-            "closed": 0,
-            "skipped": f"not enough candles (have={len(df)}, need>{warmup})",
+            "strategy": strategy_name, "symbol": sym, "tf": tf,
+            "trades_csv": trades_path, "final_balance": broker.balance,
+            "closed": 0, "skipped": f"not enough candles (have={len(df)}, need>{warmup})",
         }
 
-    # ---- Event loop ----
     for i in range(warmup, len(df) + 1):
         candle = df.iloc[i - 1]
-        now = candle.name
+        now    = candle.name
 
         broker.update_with_candle(candle, now, sym, tf)
 
         # 300 bars: covers atr_period*3 + swing_window*4 + 100 with room to spare.
-        # Increase this if you raise swing_window beyond 20.
-        context = df.iloc[max(0, i-300):i]
-        order = strat.on_candles(context, sym)
+        # Increase if swing_window > 20.
+        context = df.iloc[max(0, i - 300):i]
+        order   = strat.on_candles(context, sym)
 
         if order is None or order.side not in ("buy", "sell"):
             continue
 
-        order.meta = order.meta or {}
+        order.meta       = order.meta or {}
         order.meta["tf"] = tf
 
         broker.open_from_order(
@@ -149,7 +131,6 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
             market_close_price=to_float(candle["close"]),
         )
 
-    # close leftovers at end
     last = df.iloc[-1]
     broker.force_close_all(
         now=last.name,
@@ -159,152 +140,208 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
         status="data_end",
     )
 
-    # Print strategy diagnostics if available
     if hasattr(strat, "print_diagnostics"):
         strat.print_diagnostics()
 
     return {
-        "strategy": strategy_name,
-        "symbol": sym,
-        "tf": tf,
-        "trades_csv": trades_path,
-        "final_balance": broker.balance,
-        "closed": len(broker.closed_positions),
-        "skipped": None,
+        "strategy": strategy_name, "symbol": sym, "tf": tf,
+        "trades_csv": trades_path, "final_balance": broker.balance,
+        "closed": len(broker.closed_positions), "skipped": None,
     }
 
 
-# -----------------------------
-# Performance aggregation
-# -----------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Reporting helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def _read_trades_csv(path: str) -> pd.DataFrame:
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame(columns=TRADES_HEADER)
-
     df = pd.read_csv(path)
-
-    # Guard: empty file with just header
     if df.empty:
         return df
-
-    # normalize
-    if "close_time" in df.columns:
-        df["close_time"] = pd.to_datetime(df["close_time"], errors="coerce")
-    if "pnl" in df.columns:
-        df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
-
-    # only closed trades with a timestamp
-    df = df.dropna(subset=["close_time"])
-    return df
+    for col in ("close_time", "open_time"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    for col in ("pnl", "R"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return df.dropna(subset=["close_time"])
 
 
-def compute_returns(results: list[dict], starting_balance: float, strategies: list[str], symbols: list[str]) -> None:
-    """
-    Prints:
-      - Monthly return % per strategy across all symbols
-      - Weekly return % per strategy across all symbols
-      - Monthly/Weekly return % combined across all strategies+symbols
-    """
-    n_syms = max(1, len(symbols))
+def _stats(df: pd.DataFrame, capital: float) -> dict:
+    """Single source of truth for trade stats."""
+    if df.empty:
+        return {}
+
+    total    = len(df)
+    wins     = int((df["R"] > 0).sum())
+    losses   = int((df["R"] <= 0).sum())
+    wr       = wins / total
+    avg_r    = float(df["R"].mean())
+    avg_w    = float(df.loc[df["R"] > 0, "R"].mean()) if wins   else 0.0
+    avg_l    = float(df.loc[df["R"] <= 0, "R"].mean()) if losses else 0.0
+    expect   = wr * avg_w + (1 - wr) * avg_l
+    total_pnl = float(df["pnl"].sum())
+    ret_pct  = total_pnl / capital * 100
+
+    max_dd = 0.0
+    if "balance" in df.columns:
+        bal    = df["balance"].astype(float)
+        peak   = bal.cummax()
+        max_dd = float(((bal - peak) / peak * 100).min())
+
+    exits = df["status"].value_counts().to_dict()
+
+    # Per-symbol breakdown
+    sym_breakdown = {}
+    if "symbol" in df.columns:
+        for sym, sdf in df.groupby("symbol"):
+            sw = int((sdf["R"] > 0).sum())
+            sl = int((sdf["R"] <= 0).sum())
+            sym_breakdown[sym] = {
+                "trades": len(sdf),
+                "wins": sw, "losses": sl,
+                "wr": sw / len(sdf) * 100 if len(sdf) else 0,
+                "avg_r": float(sdf["R"].mean()),
+                "pnl": float(sdf["pnl"].sum()),
+            }
+
+    return {
+        "total": total, "wins": wins, "losses": losses,
+        "wr": wr * 100, "avg_r": avg_r, "avg_w": avg_w, "avg_l": avg_l,
+        "expect": expect, "pnl": total_pnl, "ret_pct": ret_pct,
+        "max_dd": max_dd, "exits": exits, "sym": sym_breakdown,
+    }
+
+
+def _sep(char="─", width=70):
+    print(char * width)
+
+
+def _print_strat_block(name: str, s: dict) -> None:
+    exits_str = "  ".join(f"{k}:{v}" for k, v in sorted(s["exits"].items()))
+    print(f"\n  Strategy : {name}")
+    print(f"  Trades   : {s['total']}  (W:{s['wins']}  L:{s['losses']}  WR:{s['wr']:.0f}%)")
+    print(f"  Avg R    : {s['avg_r']:+.2f}  |  Win:{s['avg_w']:+.2f}  Loss:{s['avg_l']:+.2f}")
+    print(f"  Expect.  : {s['expect']:+.3f} R/trade")
+    print(f"  PnL      : ${s['pnl']:+.2f}  ({s['ret_pct']:+.3f}% of allocated capital)")
+    print(f"  Max DD   : {s['max_dd']:.2f}%")
+    print(f"  Exits    : {exits_str}")
+    if s["sym"]:
+        print(f"  Per-symbol:")
+        for sym, d in sorted(s["sym"].items()):
+            print(f"    {sym:<6} trades={d['trades']:>2}  W:{d['wins']} L:{d['losses']}  "
+                  f"WR:{d['wr']:.0f}%  avg_R:{d['avg_r']:+.2f}  pnl=${d['pnl']:+.2f}")
+
+
+def compute_returns(results: list, starting_balance: float, strategies: list, symbols: list) -> None:
+    n_syms   = max(1, len(symbols))
     n_strats = max(1, len(strategies))
 
-    # collect pnl rows with strategy label
     rows = []
     for r in results:
         if r.get("skipped"):
             continue
-        path = r["trades_csv"]
-        tdf = _read_trades_csv(path)
+        tdf = _read_trades_csv(r["trades_csv"])
         if tdf.empty:
             continue
         tdf = tdf.copy()
         tdf["strategy_key"] = r["strategy"]
-        rows.append(tdf[["close_time", "pnl", "strategy_key"]])
+        rows.append(tdf)
 
     if not rows:
-        print("\n=== Returns (no closed trades found) ===")
+        print("\n=== No closed trades found ===")
         return
 
     trades = pd.concat(rows, ignore_index=True)
-
-    # Weekly bucket (Mon-Sun). You can change to "W-FRI" if you want “trading week”.
     trades["week"] = trades["close_time"].dt.to_period("W").astype(str)
 
-    # Monthly totals per strategy
-    pnl_by_strat = trades.groupby("strategy_key")["pnl"].sum().sort_index()
-
-    # Weekly totals per strategy
-    pnl_week_strat = trades.groupby(["strategy_key", "week"])["pnl"].sum().reset_index()
-
-    # denominators
-    denom_per_strat = starting_balance * n_syms
-    denom_all = starting_balance * n_syms * n_strats
-
-    print("\n=== Monthly Return % (per strategy across ALL symbols) ===")
+    # ── Per-strategy deep stats ───────────────────────────────────────────
+    _sep("═")
+    print("  STRATEGY PERFORMANCE BREAKDOWN")
+    _sep("═")
+    strat_stats = {}
     for s in strategies:
-        pnl = float(pnl_by_strat.get(s, 0.0))
-        ret_pct = (pnl / denom_per_strat) * 100.0
-        print(f"{s:8} | pnl={pnl:10.2f} | denom={denom_per_strat:10.2f} | return={ret_pct:7.3f}%")
+        sub = trades[trades["strategy_key"] == s]
+        capital = starting_balance * n_syms
+        st = _stats(sub, capital)
+        strat_stats[s] = st
+        if st:
+            _print_strat_block(s, st)
 
-    total_pnl_all = float(trades["pnl"].sum())
-    total_ret_all = (total_pnl_all / denom_all) * 100.0
-    print(f"\nALL     | pnl={total_pnl_all:10.2f} | denom={denom_all:10.2f} | return={total_ret_all:7.3f}%")
-
-    print("\n=== Weekly Return % (per strategy across ALL symbols) ===")
-    # print in week order
-    weeks = sorted(trades["week"].unique())
-
+    # ── Side-by-side comparison table ────────────────────────────────────
+    print()
+    _sep("═")
+    print(f"  {'STRATEGY':<14} {'N':>4} {'WR%':>5} {'AVG_R':>6} "
+          f"{'EXPECT':>7} {'PNL$':>9} {'RET%':>7} {'MAXDD%':>7}")
+    _sep()
     for s in strategies:
-        print(f"\n-- {s} --")
-        sub = pnl_week_strat[pnl_week_strat["strategy_key"] == s].set_index("week")["pnl"]
+        st = strat_stats.get(s, {})
+        if not st:
+            print(f"  {s:<14}  — no trades —")
+            continue
+        print(f"  {s:<14} {st['total']:>4} {st['wr']:>5.0f} {st['avg_r']:>+6.2f} "
+              f"{st['expect']:>+7.3f} {st['pnl']:>+9.2f} {st['ret_pct']:>+7.3f} {st['max_dd']:>+7.2f}")
+
+    comb_capital = starting_balance * n_syms * n_strats
+    comb = _stats(trades, comb_capital)
+    if comb:
+        _sep()
+        print(f"  {'ALL COMBINED':<14} {comb['total']:>4} {comb['wr']:>5.0f} {comb['avg_r']:>+6.2f} "
+              f"{comb['expect']:>+7.3f} {comb['pnl']:>+9.2f} {comb['ret_pct']:>+7.3f} {comb['max_dd']:>+7.2f}")
+    _sep("═")
+
+    # ── Weekly returns ────────────────────────────────────────────────────
+    denom_strat = starting_balance * n_syms
+    denom_all   = starting_balance * n_syms * n_strats
+    weeks       = sorted(trades["week"].unique())
+    pw          = trades.groupby(["strategy_key", "week"])["pnl"].sum().reset_index()
+
+    print("\n=== Weekly Return % (per strategy) ===")
+    for s in strategies:
+        print(f"\n  -- {s} --")
+        sub = pw[pw["strategy_key"] == s].set_index("week")["pnl"]
         for w in weeks:
             pnl = float(sub.get(w, 0.0))
-            ret_pct = (pnl / denom_per_strat) * 100.0
-            print(f"{w} | pnl={pnl:10.2f} | return={ret_pct:7.3f}%")
+            print(f"    {w} | pnl={pnl:+9.2f} | {pnl / denom_strat * 100:+7.3f}%")
 
-    print("\n=== Weekly Return % (ALL strategies combined) ===")
-    pnl_week_all = trades.groupby("week")["pnl"].sum()
+    print("\n=== Weekly Return % (ALL combined) ===")
+    pwa = trades.groupby("week")["pnl"].sum()
     for w in weeks:
-        pnl = float(pnl_week_all.get(w, 0.0))
-        ret_pct = (pnl / denom_all) * 100.0
-        print(f"{w} | pnl={pnl:10.2f} | return={ret_pct:7.3f}%")
+        pnl = float(pwa.get(w, 0.0))
+        print(f"  {w} | pnl={pnl:+9.2f} | {pnl / denom_all * 100:+7.3f}%")
 
 
-# -----------------------------
-# Main
-# -----------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    eng = cfg["engine"]
-    symbols = eng.get("symbols", ["SPY", "QQQ", "GLD"])
-    timeframes = eng.get("timeframes", ["5m"])
-    strategies_to_run = eng.get("strategies_to_run", ["orb", "vwap_mr", "vwap_tp"])
+    eng               = cfg["engine"]
+    symbols           = eng.get("symbols", ["SPY", "QQQ", "GLD"])
+    timeframes        = eng.get("timeframes", ["5m"])
+    strategies_to_run = eng.get("strategies_to_run", ["swing_bos"])
 
     results = []
-    print("\n=== Phase-1 batch backtests (period-based) ===")
+    print("\n=== Phase-1 batch backtests ===")
     for strat_name in strategies_to_run:
         print(f"\n--- Strategy: {strat_name} ---")
         for tf in timeframes:
             for sym in symbols:
                 r = backtest_one(strat_name, sym, tf, cfg)
                 results.append(r)
-
                 if r["skipped"]:
-                    print(f"[SKIP] {strat_name} | {sym} {tf} -> {r['skipped']}")
+                    print(f"  [SKIP] {sym} {tf} -> {r['skipped']}")
                 else:
-                    print(
-                        f"[DONE] {strat_name} | {sym} {tf} | closed={r['closed']} | final={r['final_balance']:.2f} | {r['trades_csv']}"
-                    )
+                    print(f"  [DONE] {sym} {tf} | closed={r['closed']} | final={r['final_balance']:.2f}")
 
-    print("\n=== Summary ===")
+    print("\n=== Run Summary ===")
     for r in results:
-        status = "SKIP" if r["skipped"] else "OK"
-        print(
-            f"{status:4} | {r['strategy']:7} | {r['symbol']:5} {r['tf']:3} | closed={r['closed']:3} | final={r['final_balance']:.2f} | {r['trades_csv']}"
-        )
+        tag = "SKIP" if r["skipped"] else "OK"
+        print(f"  {tag:4} | {r['strategy']:14} | {r['symbol']:5} {r['tf']:3} | "
+              f"closed={r['closed']:3} | final={r['final_balance']:.2f}")
 
-    # ---- returns ----
     starting_balance = float(eng.get("paper_balance", 10000.0))
     compute_returns(results, starting_balance, strategies_to_run, symbols)
