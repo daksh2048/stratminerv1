@@ -1,7 +1,7 @@
 engine:
   timeframes: ["5m","15m","30m","1h"]
   period: "60d"
-  symbols: ["SPY","QQQ","GLD","SLV","AMZN","TSLA","GOOGL","AAPL"]
+  symbols: ["SPY"]
   exchange: "yahoo"
 
   paper_balance: 10000.0
@@ -13,76 +13,86 @@ engine:
   warmup_bars: 80
 
   # run these 3
-  strategies_to_run: ["vwap_mr","vwap_tp"]
+  strategies_to_run: ["swing_bos"]
 
 logging:
   out_dir: "backtests"
 
 strategies:
+  swing_bos:
+    market_tz: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
+    min_minutes_after_open: 30
+    entry_cutoff_minutes: 240
+    htf_timeframe: 1h
+    htf_ema_period: 20
+    swing_window: 5
+    atr_period: 14
+    stop_atr_mult: 1.5
+    risk_reward: 2.5
+    min_atr: 0.10
+    max_trades_per_day: 2
+    trail_mode: atr
+    trail_atr_mult: 2.0
+
+  # ========================================
+  # ORB - Uses Chandelier Trailing
+  # ========================================
   orb:
+    market_tz: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
     opening_range_minutes: 30
     risk_reward: 2.0
     once_per_day: true
     rth_only: true
     entry_cutoff_minutes: 60
+    trail_mode: chandelier
+    trail_atr_mult: 2.5
+    trail_lookback: 10
+
+  # ========================================
+  # VWAP MR - Uses Tiered Trailing
+  # ========================================
+  vwap_mr:
     market_tz: America/New_York
     rth_open: "09:30"
     rth_close: "16:00"
-
-  vwap_mr:
-    # ATR-based bands
     atr_period: 14
-    band_atr_mult: 1.5      # outer band (wider for more signals)
-    
-    # Reclaim confirmation
-    reclaim_bars: 3
-    reclaim_threshold: 0.66 # need 66% of bars directional (not 100%)
-    
-    # Time window (only trades during these times)
+    band_atr_mult: 1.5
     min_minutes_after_open: 20
-    max_minutes_after_open: 180  # 3 hours
-    
-    # Stops/targets
-    stop_atr_mult: 1.0
+    max_minutes_after_open: 180
     rr: 1.5
-    
-    # Limits
+    stop_atr_mult: 1.0
+    reclaim_bars: 3
+    reclaim_threshold: 0.66
     max_trades_per_day: 2
-    
-    # Market hours (indicators calculated on full day, trades only in RTH)
-    market_tz: "America/New_York"
+    trail_mode: tiered
+    trail_tier1_pct: 0.04
+    trail_tier2_pct: 0.02
+    trail_tier3_pct: 0.01
+
+  # ========================================
+  # VWAP TP - Uses Simple Percent Trailing
+  # ========================================
+  vwap_tp:
+    market_tz: America/New_York
     rth_open: "09:30"
     rth_close: "16:00"
-  
-  
-  # ----------------------------------------
-  # VWAP Trend Pullback (FIXED FOR HTF)
-  # ----------------------------------------
-  vwap_tp:
-    # Indicators
-    ema_period: 20
-    atr_period: 14
-    
-    # Trend filter (disabled by default - enable only for 5m if desired)
-    use_trend_filter: false
-    ema_slope_min_atr: 0.08
-    
-    # Pullback & reclaim
-    pullback_bars: 4
-    reclaim_threshold: 0.66
-    
-    # Stops/targets
-    stop_atr_mult: 1.2
-    risk_reward: 2.0
-    
-    # Time window (only trades during these times)
     min_minutes_after_open: 15
     entry_cutoff_minutes: 240
-    
-    # Limits
+    ema_period: 20
+    atr_period: 14
+    stop_atr_mult: 1.2
+    risk_reward: 2.0
+    use_trend_filter: false
+    ema_slope_min_atr: 0.08
+    pullback_bars: 4
+    reclaim_threshold: 0.66
     max_trades_per_day: 2
-    
-    # Market hours (indicators calculated on full day, trades only in RTH)
-    market_tz: "America/New_York"
-    rth_open: "09:30"
-    rth_close: "16:00"
+    trail_mode: percent
+    trail_pct: 0.02
+
+logging:
+  out_dir: backtests

@@ -323,34 +323,73 @@ class PaperBroker:
             meta = pos.meta or {}
 
             # ----------------------------
-            # 1) Trailing stop maintenance
+            # 1) Trailing stop maintenance (with advanced mode support)
             # ----------------------------
-            trail_pct = meta.get("trail_pct", None)
+            trail_mode = str(meta.get("trail_mode", "percent"))
             activate_after_partial = bool(meta.get("trail_activate_after_partial", False))
             partial_done = bool(meta.get("partial_done", False))
-
-            # decide if trailing is active
-            if trail_pct is not None:
+            
+            # Activate trailing
+            trail_pct = meta.get("trail_pct", None)
+            if trail_pct is not None or trail_mode != "percent":
                 if (not activate_after_partial) or partial_done:
                     meta["trail_active"] = True
-
-            # FIX: Ensure peak/trough exist before using
-            if bool(meta.get("trail_active", False)) and trail_pct is not None and float(trail_pct) > 0:
-                tpct = float(trail_pct)
-                if pos.side == "buy":
-                    current_peak = float(meta.get("peak", pos.entry))
-                    meta["peak"] = max(current_peak, high)
-                    peak = float(meta["peak"])
-                    new_stop = peak * (1.0 - tpct)
-                    if new_stop > pos.stop:
-                        pos.stop = new_stop
-                else:
-                    current_trough = float(meta.get("trough", pos.entry))
-                    meta["trough"] = min(current_trough, low)
-                    trough = float(meta["trough"])
-                    new_stop = trough * (1.0 + tpct)
-                    if new_stop < pos.stop:
-                        pos.stop = new_stop
+            
+            # Execute trailing if active
+            if bool(meta.get("trail_active", False)):
+                # Try to import advanced trailing module
+                try:
+                    from src.core.trailing_stops import calculate_trailing_stop
+                    use_advanced = True
+                except ImportError:
+                    use_advanced = False
+                
+                # Advanced trailing (if module available and mode is not "percent")
+                if use_advanced and trail_mode != "percent":
+                    # Get ATR if needed for ATR-based modes
+                    atr_current = None
+                    if trail_mode in ("atr", "chandelier", "hybrid"):
+                        # Use ATR from strategy meta if available
+                        atr_current = meta.get("atr", None)
+                        if atr_current is not None:
+                            atr_current = float(atr_current)
+                    
+                    # Call advanced trailing
+                    new_stop = calculate_trailing_stop(
+                        pos_side=pos.side,
+                        pos_entry=pos.entry,
+                        current_stop=pos.stop,
+                        candle_high=high,
+                        candle_low=low,
+                        meta=meta,
+                        df_recent=None,
+                        atr_current=atr_current,
+                    )
+                    
+                    # Apply new stop
+                    if new_stop is not None:
+                        if pos.side == "buy" and new_stop > pos.stop:
+                            pos.stop = new_stop
+                        elif pos.side == "sell" and new_stop < pos.stop:
+                            pos.stop = new_stop
+                
+                # Simple percentage trailing (fallback or if mode is "percent")
+                elif trail_pct is not None and float(trail_pct) > 0:
+                    tpct = float(trail_pct)
+                    if pos.side == "buy":
+                        current_peak = float(meta.get("peak", pos.entry))
+                        meta["peak"] = max(current_peak, high)
+                        peak = float(meta["peak"])
+                        new_stop = peak * (1.0 - tpct)
+                        if new_stop > pos.stop:
+                            pos.stop = new_stop
+                    else:
+                        current_trough = float(meta.get("trough", pos.entry))
+                        meta["trough"] = min(current_trough, low)
+                        trough = float(meta["trough"])
+                        new_stop = trough * (1.0 + tpct)
+                        if new_stop < pos.stop:
+                            pos.stop = new_stop
 
             # Move stop to breakeven after partial (redundant safety; also done in partial function)
             if partial_done and bool(meta.get("move_stop_to_be", False)):

@@ -9,6 +9,7 @@ from src.core.execution import PaperBroker
 from src.strategies.opening_range_breakout import OpeningRangeBreakout
 from src.strategies.vwap_mean_reversion import VWAPMeanReversion
 from src.strategies.vwap_trend_pullback import VWAPTrendPullback
+from src.strategies.swing_bos import SwingBOS
 
 
 TRADES_HEADER = [
@@ -72,6 +73,9 @@ def make_strategy(name: str, cfg: dict, tf: str):
 
     if name == "vwap_tp":
         return VWAPTrendPullback(name="vwap_tp", **strat_cfg)
+
+    if name == "swing_bos":
+        return SwingBOS(name="swing_bos", **strat_cfg)
 
     raise ValueError(f"Unknown strategy: {name}")
 
