@@ -145,6 +145,12 @@ class OpeningRangeBreakout(Strategy):
                     "session_open": str(session_open),
                     "session_close": str(session_close),
                     "entry_cutoff_minutes": entry_cutoff_minutes,
+
+                    "trail_mode": str(self.params.get("trail_mode", "percent")).lower(),
+                    "trail_pct": self.params.get("trail_pct", None),              # only used for percent mode
+                    "trail_atr_mult": self.params.get("trail_atr_mult", 2.0),
+                    "trail_lookback": self.params.get("trail_lookback", 10),
+                    "trail_activate_after_partial": self.params.get("trail_activate_after_partial", False),
                 },
             )
 

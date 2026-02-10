@@ -157,6 +157,10 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
         status="data_end",
     )
 
+    # Print strategy diagnostics if available
+    if hasattr(strat, "print_diagnostics"):
+        strat.print_diagnostics()
+
     return {
         "strategy": strategy_name,
         "symbol": sym,

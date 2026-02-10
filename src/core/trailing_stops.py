@@ -14,7 +14,7 @@ Usage in strategy:
     }
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 import pandas as pd
 import numpy as np
 
@@ -106,13 +106,17 @@ def calculate_trailing_stop(
 def _trail_percent(pos_side: str, meta: dict) -> Optional[float]:
     """Simple percentage-based trailing (original method)"""
     trail_pct = float(meta.get("trail_pct", 0.02))
-    
+
     if pos_side == "buy":
-        peak = float(meta.get("peak", 0))
-        return peak * (1.0 - trail_pct)
+        peak = meta.get("peak", None)
+        if peak is None:
+            return None  # peak not initialised yet; caller uses current_stop
+        return float(peak) * (1.0 - trail_pct)
     else:
-        trough = float(meta.get("trough", 0))
-        return trough * (1.0 + trail_pct)
+        trough = meta.get("trough", None)
+        if trough is None:
+            return None
+        return float(trough) * (1.0 + trail_pct)
 
 
 def _trail_atr(pos_side: str, meta: dict, atr: Optional[float]) -> Optional[float]:
@@ -121,13 +125,17 @@ def _trail_atr(pos_side: str, meta: dict, atr: Optional[float]) -> Optional[floa
         return _trail_percent(pos_side, meta)  # Fallback
     
     trail_atr_mult = float(meta.get("trail_atr_mult", 2.0))
-    
+
     if pos_side == "buy":
-        peak = float(meta.get("peak", 0))
-        return peak - (trail_atr_mult * atr)
+        peak = meta.get("peak", None)
+        if peak is None:
+            return None
+        return float(peak) - (trail_atr_mult * atr)
     else:
-        trough = float(meta.get("trough", 0))
-        return trough + (trail_atr_mult * atr)
+        trough = meta.get("trough", None)
+        if trough is None:
+            return None
+        return float(trough) + (trail_atr_mult * atr)
 
 
 def _trail_chandelier(
@@ -204,29 +212,36 @@ def _trail_structure(
         return _trail_percent(pos_side, meta)
     
     # Detect recent swing
+    # trail_lookback controls how many bars back we scan for a structural swing.
+    # Default 30 — swing_window*2 (old default of 10) was far too short;
+    # intraday swings on 5m bars can easily be 30-80 bars apart.
+    lookback = int(meta.get("trail_lookback", 30))
+
     if pos_side == "buy":
-        # Find last swing low
-        lows = df_recent["low"].tail(swing_window * 2).values
+        # Find last swing low within lookback bars
+        lows = df_recent["low"].tail(lookback).values
         swing_idx = None
         for i in range(swing_window, len(lows) - swing_window):
-            left = lows[i-swing_window:i]
-            right = lows[i+1:i+swing_window+1]
-            if lows[i] < min(left.min(), right.min()):
-                swing_idx = i
-        
+            left = lows[i - swing_window:i]
+            right = lows[i + 1:i + swing_window + 1]
+            if len(left) == swing_window and len(right) == swing_window:
+                if lows[i] < min(left.min(), right.min()):
+                    swing_idx = i  # keep iterating — last assignment = most recent
+
         if swing_idx is not None:
             swing_low = float(lows[swing_idx])
             return swing_low - (buffer_atr_mult * atr)
     else:
-        # Find last swing high
-        highs = df_recent["high"].tail(swing_window * 2).values
+        # Find last swing high within lookback bars
+        highs = df_recent["high"].tail(lookback).values
         swing_idx = None
         for i in range(swing_window, len(highs) - swing_window):
-            left = highs[i-swing_window:i]
-            right = highs[i+1:i+swing_window+1]
-            if highs[i] > max(left.max(), right.max()):
-                swing_idx = i
-        
+            left = highs[i - swing_window:i]
+            right = highs[i + 1:i + swing_window + 1]
+            if len(left) == swing_window and len(right) == swing_window:
+                if highs[i] > max(left.max(), right.max()):
+                    swing_idx = i
+
         if swing_idx is not None:
             swing_high = float(highs[swing_idx])
             return swing_high + (buffer_atr_mult * atr)
@@ -245,16 +260,13 @@ def _trail_hybrid(
     atr_stop = _trail_atr(pos_side, meta, atr)
     structure_stop = _trail_structure(pos_side, meta, df_recent, atr)
     
-    if atr_stop is None:
-        return structure_stop
-    if structure_stop is None:
-        return atr_stop
-    
-    # Use the stop that's further from peak/trough (more conservative)
+    # Use the TIGHTER stop (higher for longs, lower for shorts).
+    # Neither atr_stop nor structure_stop can be None (both have percent fallbacks),
+    # so no None guards are needed here.
     if pos_side == "buy":
-        return max(atr_stop, structure_stop)
+        return max(atr_stop, structure_stop)   # higher = tighter for longs
     else:
-        return min(atr_stop, structure_stop)
+        return min(atr_stop, structure_stop)   # lower  = tighter for shorts
 
 
 def _trail_parabolic(pos_side: str, meta: dict) -> Optional[float]:
@@ -271,11 +283,15 @@ def _trail_parabolic(pos_side: str, meta: dict) -> Optional[float]:
     current_trail_pct = max(min_trail, initial_trail - (acceleration * bars_in_position))
     
     if pos_side == "buy":
-        peak = float(meta.get("peak", 0))
-        return peak * (1.0 - current_trail_pct)
+        peak = meta.get("peak", None)
+        if peak is None:
+            return None
+        return float(peak) * (1.0 - current_trail_pct)
     else:
-        trough = float(meta.get("trough", 0))
-        return trough * (1.0 + current_trail_pct)
+        trough = meta.get("trough", None)
+        if trough is None:
+            return None
+        return float(trough) * (1.0 + current_trail_pct)
 
 
 # ============================================================================

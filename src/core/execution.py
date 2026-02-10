@@ -331,6 +331,21 @@ class PaperBroker:
             meta = pos.meta or {}
 
             # ----------------------------
+            # 0) Position expiry via max_bars_open
+            #    Strategies can pass max_bars_open in meta to enforce
+            #    a time-based close (e.g. EOD = bars until session close).
+            #    This prevents multi-day holds on intraday strategies.
+            # ----------------------------
+            max_bars = meta.get("max_bars_open", None)
+            if max_bars is not None:
+                bars_open = int(meta.get("bars_open", 0)) + 1
+                meta["bars_open"] = bars_open
+                if bars_open >= int(max_bars):
+                    self._close_position(pos, now, close, "max_bars")
+                    closed_positions.append(pos)
+                    continue
+
+            # ----------------------------
             # 1) Trailing stop maintenance (with advanced mode support)
             # ----------------------------
             trail_mode = str(meta.get("trail_mode", "percent"))
@@ -354,18 +369,27 @@ class PaperBroker:
                 
                 # Advanced trailing (if module available and mode is not "percent")
                 if use_advanced and trail_mode != "percent":
-                    # Get ATR if needed for ATR-based modes
+                    # Build df_recent from live candle buffer (used by chandelier, hybrid,
+                    # structure modes AND for live ATR recalculation).
+                    df_recent = None
+                    if symbol in self._candle_buffer and len(self._candle_buffer[symbol]) >= 5:
+                        df_recent = pd.DataFrame(self._candle_buffer[symbol])
+
+                    # Recalculate ATR from live buffer so trailing adapts to current
+                    # volatility instead of being frozen at entry-time ATR.
                     atr_current = None
                     if trail_mode in ("atr", "chandelier", "hybrid"):
-                        # Use ATR from strategy meta if available
-                        atr_current = meta.get("atr", None)
-                        if atr_current is not None:
-                            atr_current = float(atr_current)
-                    
-                    # Build df_recent from candle buffer for hybrid mode
-                    df_recent = None
-                    if trail_mode == "hybrid" and symbol in self._candle_buffer and len(self._candle_buffer[symbol]) >= 5:
-                        df_recent = pd.DataFrame(self._candle_buffer[symbol])
+                        if df_recent is not None and len(df_recent) >= 15:
+                            try:
+                                from src.core.trailing_stops import calculate_atr
+                                atr_current = calculate_atr(df_recent, period=14)
+                            except Exception:
+                                pass
+                        # Fallback: use entry-time ATR stored in meta if buffer not warm
+                        if atr_current is None:
+                            _meta_atr = meta.get("atr", None)
+                            if _meta_atr is not None:
+                                atr_current = float(_meta_atr)
 
                     # Call advanced trailing
                     new_stop = calculate_trailing_stop(

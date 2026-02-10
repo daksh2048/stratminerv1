@@ -1,7 +1,7 @@
 engine:
   timeframes: ["5m"]
   period: "60d"
-  symbols: ["SPY"]
+  symbols: ["SPY","QQQ","GLD","SLV","AMZN","AAPL"]
   exchange: "yahoo"
 
   paper_balance: 10000.0
@@ -29,13 +29,19 @@ strategies:
     htf_ema_period: 50
     swing_window: 10
     atr_period: 14
-    stop_atr_mult: 2.5
+    stop_atr_mult: 1.0
     risk_reward: 2.0
     min_atr: 0.15
     max_trades_per_day: 3
-    trail_mode: hybrid
+    trail_mode: atr
     trail_atr_mult: 2.0
-    trail_pct: 0.02
+    trail_activate_after_partial: true
+    runner_take_mode: rr
+    runner_rr: 3.0
+    partial_take_pct: 0.5
+    partial_take_rr: 1.5
+    max_bars_open: 78
+
 
   # ========================================
   # ORB - Uses Chandelier Trailing
@@ -49,7 +55,7 @@ strategies:
     once_per_day: true
     rth_only: true
     entry_cutoff_minutes: 60
-    trail_mode: chandelier
+    trail_mode: tiered
     trail_atr_mult: 2.5
     trail_lookback: 10
 
