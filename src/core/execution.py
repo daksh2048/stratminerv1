@@ -61,7 +61,7 @@ class PaperBroker:
 
         self.open_positions: List[Position] = []
         self.closed_positions: List[Position] = []
-        self._candle_buffer: Dict[str, list] = {}  # symbol -> last 50 candles for hybrid trailing
+        self._candle_buffer: Dict[str, list] = {}  # symbol -> last 100 candles for trailing
 
     def _breached_max_loss(self) -> bool:
         return self.balance <= self.initial_balance * (1.0 - self.max_loss_pct)
@@ -207,20 +207,26 @@ class PaperBroker:
 
     def _event_sequence(self, pos_side: Side, open_: float, close: float) -> List[str]:
         """
-        Intrabar path heuristic:
-          - Green candle (close >= open): assume LOW occurs before HIGH.
-          - Red candle (close < open): assume HIGH occurs before LOW.
+        Intrabar path heuristic (PESSIMISTIC — assumes worst case first):
+          - Green candle (close >= open): LOW before HIGH
+          - Red candle (close < open): HIGH before LOW
 
-        For LONG: stop is LOW-side, take is HIGH-side.
-        For SHORT: stop is HIGH-side, take is LOW-side.
+        For LONG: stop is LOW-side  -> green = stop first, red = stop first (high then low, low hits stop)
+        For SHORT: stop is HIGH-side -> green = stop first (low then high, high hits stop), red = stop first
 
-        Returns event order list among ["stop","take"].
+        Conservative: always assume stop fires first on ambiguous candles.
         """
         green = close >= open_
         if pos_side == "buy":
-            return ["stop", "take"] if green else ["take", "stop"]
-        else:  # sell
-            return ["take", "stop"] if green else ["stop", "take"]
+            # Long: stop is on the low side
+            # Green: low came first -> stop first. Red: high then low -> stop last... 
+            # but pessimistic = assume stop first always
+            return ["stop", "take"] if green else ["stop", "take"]
+        else:
+            # Short: stop is on the high side
+            # Red: high came first -> stop first. Green: low then high -> stop last...
+            # but pessimistic = assume stop first always
+            return ["stop", "take"] if green else ["stop", "take"]
 
     # ---------- public API ----------
 
@@ -305,18 +311,30 @@ class PaperBroker:
         return pos
 
     def update_with_candle(self, candle: pd.Series, now: Any, symbol: str, tf: str):
-        # Maintain rolling candle buffer for hybrid trailing (last 50 bars)
+        # Maintain rolling candle buffer for hybrid trailing (last 100 bars)
         if symbol not in self._candle_buffer:
             self._candle_buffer[symbol] = []
+
+        # Grab previous candle BEFORE appending current one
+        prev_candle = self._candle_buffer[symbol][-1] if self._candle_buffer[symbol] else None
+
         self._candle_buffer[symbol].append(candle)
-        if len(self._candle_buffer[symbol]) > 50:
+        if len(self._candle_buffer[symbol]) > 100:
             self._candle_buffer[symbol].pop(0)
 
-        # include open for gap logic; fallback to close if missing
+        # Current candle OHLC — used for hit detection only
         close = _to_float(candle["close"])
         open_ = _to_float(candle["open"]) if "open" in candle else close
         high = _to_float(candle["high"])
         low = _to_float(candle["low"])
+
+        # Previous candle OHLC — used for trailing stop updates
+        if prev_candle is not None:
+            prev_high = _to_float(prev_candle["high"])
+            prev_low = _to_float(prev_candle["low"])
+        else:
+            prev_high = high
+            prev_low = low
 
         closed_positions: List[Position] = []
 
@@ -372,13 +390,16 @@ class PaperBroker:
                     # Build df_recent from live candle buffer (used by chandelier, hybrid,
                     # structure modes AND for live ATR recalculation).
                     df_recent = None
-                    if symbol in self._candle_buffer and len(self._candle_buffer[symbol]) >= 5:
-                        df_recent = pd.DataFrame(self._candle_buffer[symbol])
+                    if symbol in self._candle_buffer and len(self._candle_buffer[symbol]) >= 6:
+                        # Exclude the current (last) candle from df_recent
+                        df_recent = pd.DataFrame(self._candle_buffer[symbol][:-1])
 
                     # Recalculate ATR from live buffer so trailing adapts to current
                     # volatility instead of being frozen at entry-time ATR.
                     atr_current = None
-                    if trail_mode in ("atr", "chandelier", "hybrid"):
+                    # ALL modes that use ATR (atr, chandelier, hybrid, structure) get
+                    # live recalculation. Parabolic and tiered don't need ATR.
+                    if trail_mode in ("atr", "chandelier", "hybrid", "structure"):
                         if df_recent is not None and len(df_recent) >= 15:
                             try:
                                 from src.core.trailing_stops import calculate_atr
@@ -396,8 +417,8 @@ class PaperBroker:
                         pos_side=pos.side,
                         pos_entry=pos.entry,
                         current_stop=pos.stop,
-                        candle_high=high,
-                        candle_low=low,
+                        candle_high=prev_high,
+                        candle_low=prev_low,
                         meta=meta,
                         df_recent=df_recent,
                         atr_current=atr_current,
@@ -415,14 +436,14 @@ class PaperBroker:
                     tpct = float(trail_pct)
                     if pos.side == "buy":
                         current_peak = float(meta.get("peak", pos.entry))
-                        meta["peak"] = max(current_peak, high)
+                        meta["peak"] = max(current_peak, prev_high)
                         peak = float(meta["peak"])
                         new_stop = peak * (1.0 - tpct)
                         if new_stop > pos.stop:
                             pos.stop = new_stop
                     else:
                         current_trough = float(meta.get("trough", pos.entry))
-                        meta["trough"] = min(current_trough, low)
+                        meta["trough"] = min(current_trough, prev_low)
                         trough = float(meta["trough"])
                         new_stop = trough * (1.0 + tpct)
                         if new_stop < pos.stop:

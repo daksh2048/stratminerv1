@@ -164,7 +164,7 @@ def _trail_chandelier(
 
 def _trail_tiered(pos_side: str, pos_entry: float, meta: dict) -> Optional[float]:
     """Profit-tiered trailing - tighter as profit grows"""
-    initial_stop = float(meta.get("initial_stop", 0))
+    initial_stop = float(meta.get("initial_stop", pos_entry))
     initial_risk = abs(pos_entry - initial_stop)
     
     if initial_risk <= 0:

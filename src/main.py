@@ -131,7 +131,9 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
 
         broker.update_with_candle(candle, now, sym, tf)
 
-        context = df.iloc[max(0, i-200):i]
+        # 300 bars: covers atr_period*3 + swing_window*4 + 100 with room to spare.
+        # Increase this if you raise swing_window beyond 20.
+        context = df.iloc[max(0, i-300):i]
         order = strat.on_candles(context, sym)
 
         if order is None or order.side not in ("buy", "sell"):
