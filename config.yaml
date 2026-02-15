@@ -1,19 +1,19 @@
 engine:
   timeframes: ["5m"]
-  period: "5y"
-  symbols: ["SPY","QQQ","GLD","AMZN","AAPL","GOOGL"]
+  period: "10y"
+  symbols: ["TNA","TZA","DFEN","TECL","TECS","SOXL","SOXS","CURE","LABD","WANT","RETL","NAIL","DPST","FAZ","ERX","DRIP","DUST","JDST","BOIL","KOLD","UGL","UCO","SCO"]
   exchange: "alpaca"
 
   paper_balance: 10000.0
   risk_per_trade: 0.005
   slippage_bps: 1.5
-  max_loss_pct: 0.03
+  max_loss_pct: 0.50
 
   # optional: leave this alone unless you want fewer "early bars" trades
   warmup_bars: 80
 
   # run these 3
-  strategies_to_run: ["swing_bos","orb"]
+  strategies_to_run: ["orb"]
 
 logging:
   out_dir: "backtests"
@@ -27,9 +27,9 @@ strategies:
     entry_cutoff_minutes: 240
     max_trades_per_day: 3
     exchange: "alpaca"
-    htf_timeframe: 1h
+    htf_timeframe: 1d
     htf_period: "5y"
-    htf_ema_period: 50
+    htf_ema_period: 20
     swing_window: 5
     atr_period: 14
     stop_atr_mult: 1.0
@@ -61,22 +61,42 @@ strategies:
     trail_min_pct: 0.01
 
 
-  # ========================================
-  # ORB - Uses Chandelier Trailing
-  # ========================================
   orb:
     market_tz: America/New_York
     rth_open: "09:30"
     rth_close: "16:00"
     opening_range_minutes: 30
-    risk_reward: 2.0
-    once_per_day: true
-    rth_only: true
-    entry_cutoff_minutes: 60
-    trail_mode: tiered  
-    trail_atr_mult: 2.5
-    trail_lookback: 10
+    min_minutes_after_or: 0
+    max_minutes_after_or: 360
+    exchange: "alpaca"
+    htf_timeframe: 1h
+    htf_period: "5y"
+    htf_ema_period: 20
+    atr_period: 14
+    stop_atr_mult: 1.5
+    min_atr: 0.05
+    volume_filter: true
+    volume_ema_period: 20
+    volume_mult: 1.2
+    use_retest: false
+    retest_max_bars: 20
+    retest_tolerance_atr: 0.3
+    partial_take_pct: 0.5
+    partial_take_rr: 1.5
+    risk_reward: 3.0
+    trail_mode: tiered
+    trail_activate_after_partial: true 
+    trail_tier1_pct: 0.04
+    trail_tier2_pct: 0.02
+    trail_tier3_pct: 0.01
+    trail_atr_mult: 2.0
     trail_pct: 0.02
+    trail_lookback: 10
+    trail_swing_window: 5
+    trail_buffer_mult: 0.3
+    trail_initial_pct: 0.03
+    trail_acceleration: 0.0005
+    trail_min_pct: 0.01
 
   # ========================================
   # VWAP MR - Uses Tiered Trailing

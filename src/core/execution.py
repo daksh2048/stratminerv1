@@ -281,7 +281,7 @@ class PaperBroker:
         if risk_per_unit <= 0:
             return None
 
-        risk_amount = self.balance * self.risk_per_trade
+        risk_amount = self.initial_balance * self.risk_per_trade
         size = risk_amount / risk_per_unit
 
         pos = Position(

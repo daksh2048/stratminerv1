@@ -176,16 +176,18 @@ class SwingBOS(Strategy):
         st: BOSState,
         symbol: str,
         ltf_last_ts: pd.Timestamp,
+        exchange: str = "yahoo",
     ) -> Optional[str]:
         htf_timeframe = str(self.params.get("htf_timeframe", "1h"))
         htf_ema_period = int(self.params.get("htf_ema_period", 20))
+        htf_period = str(self.params.get("htf_period", "60d"))
 
         # Fetch ONCE per backtest run per symbol
         if not st.htf_fetched:
             try:
                 print(f"  [BOS] Fetching HTF ({htf_timeframe}) for {symbol}...", end="", flush=True)
-                feed = CandleFeed(exchange="yahoo", symbol=symbol, timeframe=htf_timeframe)
-                htf_df = feed.fetch(period="60d")
+                feed = CandleFeed(exchange=exchange, symbol=symbol, timeframe=htf_timeframe)
+                htf_df = feed.fetch(period=htf_period)
                 st.htf_df = htf_df
                 st.htf_fetched = True
                 print(f" done ({len(htf_df)} bars)")
@@ -327,7 +329,8 @@ class SwingBOS(Strategy):
             return Order(symbol, None, None, None, None, "max trades/day", {"trades_today": st.trades_today})
 
         # ── HTF Bias ──────────────────────────────────────────────────
-        htf_bias = self._get_htf_bias(st, symbol, last_ts_m)
+        exchange_for_htf = str(self.params.get("exchange", "yahoo"))
+        htf_bias = self._get_htf_bias(st, symbol, last_ts_m, exchange_for_htf)
 
         # Cancel pending trades if HTF bias flipped against them
         if htf_bias != "bullish" and st.pending_long:
@@ -412,23 +415,57 @@ class SwingBOS(Strategy):
 
         # ── Helper to build order meta ────────────────────────────────
         def _order_meta(htf_bias, bos_level, stop):
-            return {
+            meta = {
                 "htf_bias":                 htf_bias,
                 "bos_level":                bos_level,
                 "atr":                      atr_now,
-                # Trailing: reads trail_mode from config.yaml via params
+                # Trailing mode
                 "trail_mode":               trail_mode,
                 "trail_atr_mult":           trail_atr_mult,
                 "trail_activate_after_partial": trail_activate_after_partial,
                 # Partial TP wiring
                 "partial_take_pct":         partial_take_pct,
+                "partial_take_rr":          partial_take_rr,
                 "move_stop_to_be":          True,
                 "runner_take_mode":         "rr",
                 "runner_rr":                risk_reward,
                 "initial_stop":             stop,
-                # Time-based expiry — 0 means disabled
+                # Time-based expiry
                 "max_bars_open":            max_bars_open if max_bars_open > 0 else None,
             }
+            
+            # Add all trailing mode specific params from config
+            # Percent mode
+            if "trail_pct" in self.params:
+                meta["trail_pct"] = float(self.params["trail_pct"])
+            
+            # Chandelier mode
+            if "trail_lookback" in self.params:
+                meta["trail_lookback"] = int(self.params["trail_lookback"])
+            
+            # Tiered mode
+            if "trail_tier1_pct" in self.params:
+                meta["trail_tier1_pct"] = float(self.params["trail_tier1_pct"])
+            if "trail_tier2_pct" in self.params:
+                meta["trail_tier2_pct"] = float(self.params["trail_tier2_pct"])
+            if "trail_tier3_pct" in self.params:
+                meta["trail_tier3_pct"] = float(self.params["trail_tier3_pct"])
+            
+            # Structure mode
+            if "trail_swing_window" in self.params:
+                meta["trail_swing_window"] = int(self.params["trail_swing_window"])
+            if "trail_buffer_mult" in self.params:
+                meta["trail_buffer_mult"] = float(self.params["trail_buffer_mult"])
+            
+            # Parabolic mode
+            if "trail_initial_pct" in self.params:
+                meta["trail_initial_pct"] = float(self.params["trail_initial_pct"])
+            if "trail_acceleration" in self.params:
+                meta["trail_acceleration"] = float(self.params["trail_acceleration"])
+            if "trail_min_pct" in self.params:
+                meta["trail_min_pct"] = float(self.params["trail_min_pct"])
+            
+            return meta
 
         # ══════════════════════════════════════════════════════════════
         # RETEST STATE MACHINE — check pending before looking for new BOS
