@@ -42,3 +42,4 @@ class Position:
 
     strategy: str = ""       # which strategy opened this position
     status: str = "open"     # 'open', 'stopped', 'tp', 'closed'
+    meta: Dict[str, Any] = field(default_factory=dict)  # Strategy metadata (trailing stops, etc.)

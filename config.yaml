@@ -1,7 +1,7 @@
 engine:
   timeframes: ["5m"]
-  period: "10y"
-  symbols: ["TNA","TZA","DFEN","TECL","TECS","SOXL","SOXS","CURE","LABD","WANT","RETL","NAIL","DPST","FAZ","ERX","DRIP","DUST","JDST","BOIL","KOLD","UGL","UCO","SCO"]
+  period: "5y"
+  symbols: ["BOIL", "KOLD", "UCO", "GUSH", "UGL", "GLD", "NUGT", "DUST", "SLV", "TQQQ", "TNA", "UPRO", "UDOW", "TECL", "SOXL", "FAS", "LABU", "RETL", "NAIL", "XLE", "UVXY", "SVXY", "ARKK", "MARA", "SMH"]
   exchange: "alpaca"
 
   paper_balance: 10000.0
@@ -13,7 +13,7 @@ engine:
   warmup_bars: 80
 
   # run these 3
-  strategies_to_run: ["orb"]
+  strategies_to_run: ["bollinger_squeeze","sr_breakout","gap_fill","rsi_mean_reversion","ma_crossover"]
 
 logging:
   out_dir: "backtests"
@@ -98,47 +98,44 @@ strategies:
     trail_acceleration: 0.0005
     trail_min_pct: 0.01
 
-  # ========================================
-  # VWAP MR - Uses Tiered Trailing
-  # ========================================
-  vwap_mr:
+  vwap_rejection:
     market_tz: America/New_York
     rth_open: "09:30"
     rth_close: "16:00"
+    min_minutes_after_open: 30
+    max_minutes_after_open: 360
     atr_period: 14
-    band_atr_mult: 1.5
-    min_minutes_after_open: 20
-    max_minutes_after_open: 180
-    rr: 1.5
+    band_atr_mult: 2.0
+    stop_buffer_atr: 0.3
+    volume_period: 20
+    volume_mult: 2.0
+    min_wick_pct: 0.4
+    max_trades_per_day: 3
+    trail_mode: tiered
+    trail_tier1_pct: 0.03
+    trail_tier2_pct: 0.02
+    trail_tier3_pct: 0.01
+
+  vwap_momentum:
+    market_tz: America/New_York
+    rth_open: "09:30"
+    rth_close: "16:00"
+    min_minutes_after_open: 30
+    entry_cutoff_minutes: 330
+    ema_period: 20
+    atr_period: 14
     stop_atr_mult: 1.0
-    reclaim_bars: 3
-    reclaim_threshold: 0.66
-    max_trades_per_day: 2
+    risk_reward: 2.5
+    min_ema_slope_atr: 0.15
+    pullback_tolerance_atr: 0.3
+    min_continuation_atr: 0.66
+    volume_period: 20
+    volume_mult: 1.5
+    max_trades_per_day: 3
     trail_mode: tiered
     trail_tier1_pct: 0.04
     trail_tier2_pct: 0.02
     trail_tier3_pct: 0.01
-
-  # ========================================
-  # VWAP TP - Uses Simple Percent Trailing
-  # ========================================
-  vwap_tp:
-    market_tz: America/New_York
-    rth_open: "09:30"
-    rth_close: "16:00"
-    min_minutes_after_open: 15
-    entry_cutoff_minutes: 240
-    ema_period: 20
-    atr_period: 14
-    stop_atr_mult: 1.2
-    risk_reward: 2.0
-    use_trend_filter: false
-    ema_slope_min_atr: 0.08
-    pullback_bars: 4
-    reclaim_threshold: 0.66
-    max_trades_per_day: 2
-    trail_mode: tiered
-    trail_pct: 0.02
 
 logging:
   out_dir: backtests

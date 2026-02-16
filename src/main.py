@@ -7,9 +7,15 @@ from src.core.data import CandleFeed
 from src.core.execution import PaperBroker
 
 from src.strategies.opening_range_breakout import OpeningRangeBreakout
-from src.strategies.vwap_mean_reversion import VWAPMeanReversion
-from src.strategies.vwap_trend_pullback import VWAPTrendPullback
+from src.strategies.vwap_rejection import VWAPRejection
+from src.strategies.vwap_momentum import VWAPMomentum
 from src.strategies.swing_bos import SwingBOS
+
+from src.strategies.gap_fill import GapFill
+from src.strategies.bollinger_squeeze import BollingerSqueeze
+from src.strategies.ma_crossover import MovingAverageCrossover
+from src.strategies.rsi_mean_reversion import RSIMeanReversion
+from src.strategies.sr_breakout import SupportResistanceBreakout
 
 
 TRADES_HEADER = [
@@ -55,14 +61,29 @@ def make_strategy(name: str, cfg: dict, tf: str):
         strat_cfg["or_bars"] = or_bars
         return OpeningRangeBreakout(name="orb", **strat_cfg)
 
-    if name == "vwap_mr":
-        return VWAPMeanReversion(name="vwap_mr", **strat_cfg)
+    if name == "vwap_rejection":
+        return VWAPRejection(name="vwap_rejection", **strat_cfg)
 
-    if name == "vwap_tp":
-        return VWAPTrendPullback(name="vwap_tp", **strat_cfg)
+    if name == "vwap_momentum":
+        return VWAPMomentum(name="vwap_momentum", **strat_cfg)
 
     if name == "swing_bos":
         return SwingBOS(name="swing_bos", **strat_cfg)
+
+    if name == "gap_fill":
+        return GapFill(name="gap_fill", **strat_cfg)
+    
+    if name == "bollinger_squeeze":
+        return BollingerSqueeze(name="bollinger_squeeze", **strat_cfg)
+    
+    if name == "ma_crossover":
+        return MovingAverageCrossover(name="ma_crossover", **strat_cfg)
+    
+    if name == "rsi_mean_reversion":
+        return RSIMeanReversion(name="rsi_mean_reversion", **strat_cfg)
+    
+    if name == "sr_breakout":
+        return SupportResistanceBreakout(name="sr_breakout", **strat_cfg)
 
     raise ValueError(f"Unknown strategy: {name}")
 
