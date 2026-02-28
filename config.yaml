@@ -1,8 +1,8 @@
 engine:
-  timeframes: ["5m"]
-  period: "5y"
-  symbols: ["BOIL", "KOLD", "UCO", "GUSH", "UGL", "GLD", "NUGT", "DUST", "SLV", "TQQQ", "TNA", "UPRO", "UDOW", "TECL", "SOXL", "FAS", "LABU", "RETL", "NAIL", "XLE", "UVXY", "SVXY", "ARKK", "MARA", "SMH"]
-  exchange: "alpaca"
+  timeframes: ["15min"]
+  period: "3y"
+  symbols: [USDJPY]
+  exchange: "forex"
 
   paper_balance: 10000.0
   risk_per_trade: 0.005
@@ -13,7 +13,7 @@ engine:
   warmup_bars: 80
 
   # run these 3
-  strategies_to_run: ["bollinger_squeeze","sr_breakout","gap_fill","rsi_mean_reversion","ma_crossover"]
+  strategies_to_run: ["no_wick"]
 
 logging:
   out_dir: "backtests"
@@ -244,6 +244,12 @@ strategies:
     trail_tier2_pct: 0.02
     trail_tier3_pct: 0.01
     trail_atr_mult: 2.0
+
+  no_wick:
+    market_tz: America/New_York
+    max_candles_to_tap: 9
+    max_trades_per_day: 5
+    trend_lookback: 20
 
 logging:
   out_dir: backtests

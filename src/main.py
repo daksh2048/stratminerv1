@@ -16,6 +16,8 @@ from src.strategies.bollinger_squeeze import BollingerSqueeze
 from src.strategies.ma_crossover import MovingAverageCrossover
 from src.strategies.rsi_mean_reversion import RSIMeanReversion
 from src.strategies.sr_breakout import SupportResistanceBreakout
+from src.strategies.no_wick_compensation import NoWickCompensationPlay
+from src.core.futures_loader import load_futures_data
 
 
 TRADES_HEADER = [
@@ -42,9 +44,11 @@ _TF_TO_MIN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}
 
 
 def tf_minutes(tf: str) -> int:
-    if tf not in _TF_TO_MIN:
+    # Handle '15min' format as well as '15m'
+    tf_normalized = tf.replace('min', 'm')
+    if tf_normalized not in _TF_TO_MIN:
         raise ValueError(f"Unsupported timeframe: {tf}")
-    return _TF_TO_MIN[tf]
+    return _TF_TO_MIN[tf_normalized]
 
 
 def opening_minutes_to_or_bars(opening_range_minutes: int, ltf: str) -> int:
@@ -84,6 +88,9 @@ def make_strategy(name: str, cfg: dict, tf: str):
     
     if name == "sr_breakout":
         return SupportResistanceBreakout(name="sr_breakout", **strat_cfg)
+    
+    if name == "no_wick":
+        return NoWickCompensationPlay(name="no_wick", **strat_cfg)
 
     raise ValueError(f"Unknown strategy: {name}")
 
@@ -100,8 +107,15 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
 
     strat = make_strategy(strategy_name, cfg, tf)
 
-    feed = CandleFeed(exchange=eng.get("exchange", "yahoo"), symbol=sym, timeframe=tf)
-    df   = feed.fetch(period=period, limit=limit).sort_index()
+    exchange = eng.get("exchange", "yahoo")
+
+    # Handle forex/futures data from parquet files
+    if exchange in ("forex", "futures"):
+        df = load_futures_data(sym, tf, period, data_dir="data")
+    else:
+        # Use existing CandleFeed for Alpaca/Yahoo
+        feed = CandleFeed(exchange=exchange, symbol=sym, timeframe=tf)
+        df = feed.fetch(period=period, limit=limit).sort_index()
 
     out_dir     = log_cfg.get("out_dir", "backtests")
     trades_path = os.path.join(out_dir, f"trades_{strategy_name}_{sym}_{tf}.csv")

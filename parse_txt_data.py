@@ -108,7 +108,7 @@ def load_from_parquet(filepath: str) -> pd.DataFrame:
 # Example usage
 if __name__ == "__main__":
     # Parse ES futures data
-    es_path = "path/to/ES_5min.txt"  # User should replace
+    es_path = "C:\SierraChart\Data\ESZ25-CME1m.scid_BarData.txt"  # User should replace
     es_df = parse_txt_to_df(es_path, resample_to='15min')
     
     print(f"ES Data: {len(es_df)} bars")
@@ -119,7 +119,7 @@ if __name__ == "__main__":
     save_to_parquet(es_df, "ES_15min.parquet")
     
     # Parse forex data
-    usdjpy_path = "path/to/USDJPY_5min.txt"  # User should replace
+    usdjpy_path = "C:\SierraChart\Data\USDJPY.scid_BarData.txt"  # User should replace
     usdjpy_df = parse_txt_to_df(usdjpy_path, resample_to='15min')
     
     print(f"\nUSD/JPY Data: {len(usdjpy_df)} bars")
