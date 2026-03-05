@@ -1,128 +1,115 @@
 """
 Futures data loader for ES and other futures contracts
-Loads from pre-parsed parquet files
+Loads from pre-parsed parquet files, slices to requested period
 """
 import pandas as pd
 from pathlib import Path
 from typing import Optional
 
 
+def _parse_period(period: str) -> Optional[pd.DateOffset]:
+    """Parse '10y', '3y', '18m', '90d' into a DateOffset. Returns None = load all."""
+    if not period:
+        return None
+    s = str(period).strip().lower()
+    try:
+        if s.endswith("y"):
+            return pd.DateOffset(years=int(s[:-1]))
+        if s.endswith("m"):
+            return pd.DateOffset(months=int(s[:-1]))
+        if s.endswith("d"):
+            return pd.DateOffset(days=int(s[:-1]))
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 def load_futures_data(
     symbol: str,
     timeframe: str,
-    period: str = None,  # Ignored, loads full file
+    period: str = None,
     data_dir: str = "data"
 ) -> pd.DataFrame:
     """
-    Load futures data from parquet files
-    
+    Load futures data from parquet files.
+
     Args:
-        symbol: 'ES', 'NQ', 'YM', etc.
+        symbol:    'ES', 'NQ', 'USDJPY', etc.
         timeframe: '5min', '15min', '1h', etc.
-        period: Ignored (loads entire file)
-        data_dir: Directory containing parquet files
-    
+        period:    How much history to keep: '10y', '3y', '18m', '90d'.
+                   None = load entire file.
+        data_dir:  Directory containing parquet files.
+
     Returns:
-        DataFrame with OHLCV data and datetime index
-    
-    Raises:
-        FileNotFoundError: If parquet file doesn't exist
+        DataFrame with DatetimeIndex and OHLCV columns.
     """
     filepath = Path(data_dir) / f"{symbol}_{timeframe}.parquet"
-    
+
     if not filepath.exists():
         raise FileNotFoundError(
             f"\n{'='*80}\n"
-            f"Futures data file not found: {filepath}\n"
-            f"\n"
-            f"You need to parse your .txt file first:\n"
-            f"\n"
-            f"  1. Run: python parse_txt_data.py\n"
-            f"  2. Or manually:\n"
-            f"\n"
-            f"     from parse_txt_data import parse_txt_to_df, save_to_parquet\n"
-            f"     df = parse_txt_to_df('path/to/{symbol}.txt', resample_to='{timeframe}')\n"
-            f"     save_to_parquet(df, '{filepath}')\n"
-            f"\n"
+            f"Futures data file not found: {filepath}\n\n"
+            f"For ES futures, run first:\n"
+            f"  python prep_es_data.py\n\n"
+            f"For forex (USDJPY etc.), run:\n"
+            f"  python parse_txt_data.py\n"
             f"{'='*80}\n"
         )
-    
-    # Load parquet
+
     df = pd.read_parquet(filepath)
-    
-    # Ensure required columns exist
-    required_cols = ['open', 'high', 'low', 'close']
-    missing = [col for col in required_cols if col not in df.columns]
-    
-    if missing:
-        raise ValueError(f"Missing columns in {filepath}: {missing}")
-    
-    # Add volume if missing (some futures feeds don't include volume)
-    if 'volume' not in df.columns:
-        print(f"WARNING: No volume data for {symbol}, using dummy volume")
-        df['volume'] = 1
-    
+    total_bars = len(df)
+
     # Ensure datetime index
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError(f"Index is not DatetimeIndex in {filepath}")
-    
-    print(f"Loaded {symbol} {timeframe}: {len(df)} bars from {df.index[0]} to {df.index[-1]}")
-    
+
+    df = df.sort_index()
+
+    # Slice to requested period
+    offset = _parse_period(period)
+    if offset is not None:
+        cutoff = df.index[-1] - offset
+        df = df[df.index >= cutoff]
+        print(f"  [{symbol} {timeframe}] period='{period}': "
+              f"{len(df):,} bars kept of {total_bars:,} "
+              f"({df.index[0].date()} → {df.index[-1].date()})")
+    else:
+        print(f"  [{symbol} {timeframe}] loaded {total_bars:,} bars "
+              f"({df.index[0].date()} → {df.index[-1].date()})")
+
+    # Validate required columns
+    required = ["open", "high", "low", "close"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns in {filepath}: {missing}")
+
+    if "volume" not in df.columns:
+        print(f"  WARNING: no volume for {symbol} — using dummy 1s")
+        df["volume"] = 1
+
     return df
 
 
 def get_available_futures(data_dir: str = "data") -> list:
-    """
-    Get list of available futures symbols
-    
-    Returns:
-        List of (symbol, timeframe) tuples
-    """
     data_path = Path(data_dir)
-    
     if not data_path.exists():
         return []
-    
-    parquet_files = list(data_path.glob("*.parquet"))
-    
     available = []
-    for filepath in parquet_files:
-        # Parse filename: SYMBOL_TIMEFRAME.parquet
-        name = filepath.stem  # Remove .parquet
-        parts = name.split('_')
-        
+    for fp in data_path.glob("*.parquet"):
+        parts = fp.stem.split("_")
         if len(parts) >= 2:
-            symbol = parts[0]
-            timeframe = '_'.join(parts[1:])
-            available.append((symbol, timeframe))
-    
+            available.append((parts[0], "_".join(parts[1:])))
     return sorted(available)
 
 
-# Example usage
 if __name__ == "__main__":
     import sys
-    
-    # Show available data
     available = get_available_futures()
-    
     if not available:
-        print("No futures data found in data/ directory")
-        print("\nRun parse_txt_data.py first to convert .txt files to parquet")
+        print("No parquet files found in data/. Run prep_es_data.py first.")
         sys.exit(1)
-    
-    print("Available futures data:")
-    for symbol, timeframe in available:
-        print(f"  {symbol} - {timeframe}")
-    
-    # Try loading ES 5min
-    try:
-        df = load_futures_data('ES', '5min')
-        print(f"\nES 5min data:")
-        print(f"  Bars: {len(df)}")
-        print(f"  Date range: {df.index[0]} to {df.index[-1]}")
-        print(f"  Columns: {df.columns.tolist()}")
-        print(f"\nFirst 5 bars:")
-        print(df.head())
-    except FileNotFoundError as e:
-        print(f"\n{e}")
+    print("Available data:")
+    for sym, tf in available:
+        print(f"  {sym} {tf}")
+    df = load_futures_data("ES", "15min", period="10y")
+    print(df.tail())

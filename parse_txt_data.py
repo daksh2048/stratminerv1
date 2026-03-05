@@ -107,23 +107,44 @@ def load_from_parquet(filepath: str) -> pd.DataFrame:
 
 # Example usage
 if __name__ == "__main__":
-    # Parse ES futures data
-    es_path = "C:\SierraChart\Data\ESZ25-CME1m.scid_BarData.txt"  # User should replace
-    es_df = parse_txt_to_df(es_path, resample_to='15min')
-    
-    print(f"ES Data: {len(es_df)} bars")
-    print(f"Date range: {es_df.index[0]} to {es_df.index[-1]}")
-    print(es_df.head())
-    
-    # Save to parquet for faster future loads
-    save_to_parquet(es_df, "ES_15min.parquet")
-    
-    # Parse forex data
-    usdjpy_path = "C:\SierraChart\Data\USDJPY.scid_BarData.txt"  # User should replace
-    usdjpy_df = parse_txt_to_df(usdjpy_path, resample_to='15min')
-    
-    print(f"\nUSD/JPY Data: {len(usdjpy_df)} bars")
-    print(f"Date range: {usdjpy_df.index[0]} to {usdjpy_df.index[-1]}")
-    print(usdjpy_df.head())
-    
-    save_to_parquet(usdjpy_df, "USDJPY_15min.parquet")
+    import os
+
+    os.makedirs('data', exist_ok=True)
+
+    # ── USDJPY forex (15min only) ─────────────────────────────────────────────
+    usdjpy_path = r"C:\SierraChart\Data\USDJPY1mhis.scid_BarData.txt"
+    if os.path.exists(usdjpy_path):
+        usdjpy_df = parse_txt_to_df(usdjpy_path, resample_to='15min')
+        print(f"USDJPY: {len(usdjpy_df)} bars  {usdjpy_df.index[0]} → {usdjpy_df.index[-1]}")
+        save_to_parquet(usdjpy_df, "data/USDJPY_15min.parquet")
+    else:
+        print(f"Skipping USDJPY — file not found: {usdjpy_path}")
+
+    # ── ES futures — generate ALL timeframes so strategies never crash ────────
+    es_path = r"C:\SierraChart\Data\ESZ25-CME1m.scid_BarData.txt"
+    if os.path.exists(es_path):
+        es_1m = parse_txt_to_df(es_path)
+        print(f"ES raw 1min: {len(es_1m)} bars  {es_1m.index[0]} → {es_1m.index[-1]}")
+
+        # Slice to last 10 years
+        cutoff = es_1m.index[-1] - pd.DateOffset(years=10)
+        es_1m  = es_1m[es_1m.index >= cutoff]
+        print(f"ES after 10y slice: {len(es_1m)} bars  ({es_1m.index[0].date()} → {es_1m.index[-1].date()})")
+
+        # Generate every timeframe the strategies might request
+        for label, rule in [("5min", "5min"), ("15min", "15min"),
+                             ("30min", "30min"), ("1h", "1h")]:
+            df_tf = resample_bars(es_1m, rule)
+            save_to_parquet(df_tf, f"data/ES_{label}.parquet")
+
+        # Also save with short-name aliases (e.g. "30m", "1h") that some
+        # strategy configs may request via tf param
+        for src_label, alias in [("30min", "30m"), ("1h", "60m")]:
+            import shutil
+            src = f"data/ES_{src_label}.parquet"
+            dst = f"data/ES_{alias}.parquet"
+            if not os.path.exists(dst):
+                shutil.copy(src, dst)
+                print(f"  Aliased {src} → {dst}")
+    else:
+        print(f"Skipping ES — file not found: {es_path}")

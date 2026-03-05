@@ -27,6 +27,7 @@ src/core/secrets.py
 .env
 
 # --- Cache ---
+data/
 data_cache/
 backtests/cache/
 *.parquet

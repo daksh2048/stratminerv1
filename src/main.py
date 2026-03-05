@@ -15,6 +15,7 @@ from src.strategies.gap_fill import GapFill
 from src.strategies.bollinger_squeeze import BollingerSqueeze
 from src.strategies.ma_crossover import MovingAverageCrossover
 from src.strategies.rsi_mean_reversion import RSIMeanReversion
+from src.strategies.rsi_extremes_reversal import RSIExtremesReversal
 from src.strategies.sr_breakout import SupportResistanceBreakout
 from src.strategies.no_wick_compensation import NoWickCompensationPlay
 from src.core.futures_loader import load_futures_data
@@ -85,6 +86,9 @@ def make_strategy(name: str, cfg: dict, tf: str):
     
     if name == "rsi_mean_reversion":
         return RSIMeanReversion(name="rsi_mean_reversion", **strat_cfg)
+
+    if name == "rsi_extremes_reversal":
+        return RSIExtremesReversal(name="rsi_extremes_reversal", **strat_cfg)
     
     if name == "sr_breakout":
         return SupportResistanceBreakout(name="sr_breakout", **strat_cfg)
@@ -148,9 +152,8 @@ def backtest_one(strategy_name: str, sym: str, tf: str, cfg: dict) -> dict:
 
         broker.update_with_candle(candle, now, sym, tf)
 
-        # 300 bars: covers atr_period*3 + swing_window*4 + 100 with room to spare.
-        # Increase if swing_window > 20.
-        context = df.iloc[max(0, i - 300):i]
+        context_bars = int(eng.get("context_bars", 500))
+        context = df.iloc[max(0, i - context_bars):i]
         order   = strat.on_candles(context, sym)
 
         if order is None or order.side not in ("buy", "sell"):
@@ -351,7 +354,11 @@ def compute_returns(results: list, starting_balance: float, strategies: list, sy
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    with open("config.yaml", "r", encoding="utf-8") as f:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config.yaml")
+    args = parser.parse_args()
+    with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     eng               = cfg["engine"]
